@@ -5,6 +5,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <ostream>
 #include <set>
@@ -258,7 +259,7 @@ protected:
     DefMap<std::string> locals_;
     DefMap<std::string> globals_;
     DefMap<std::string> types_;
-    LamMap<BB> lam2bb_;
+    std::map<Lam*, BB> lam2bb_;
 
     std::set<std::string> decls_;
     std::ostringstream type_decls_;
@@ -455,7 +456,7 @@ inline void Emitter::visit(const Nest& nest) {
 
     finalize();
     locals_.clear();
-    assert_unused(lam2bb_.size() == old_size && "really make sure we didn't trigger a rehash");
+    assert_unused(lam2bb_.size() == old_size && "unexpected basic block insertion");
     // A BB never crosses a function boundary: Nest::contains is `def->has_free_vars_in(vars())`,
     // so a *closed* Lam is never a member of another Lam's Nest - and it cannot belong to two Nests either,
     // since a Lam free in the vars of two closed Lams would make the outer one open.

@@ -1,0 +1,44 @@
+// RUN: rm -f %{s:stem}.ll
+// RUN: %mim -p ll %s
+// RUN: clang -c %{s:stem}.ll -o %t -Wno-override-module
+
+plugin core;
+use core.ops.u.w;
+
+plugin mem;
+plugin buffer;
+plugin tensor;
+
+extern fun atoi [mm: mem.M 0, str: mem.Ptr0 «⊤:Nat; I8»] : [mem.M 0, I32];
+extern fun println_str[mem.M 0, mem.Ptr0 «⊤:Nat; I8»]: mem.M 0;
+extern fun print_int_matrix [mm: mem.M 0, k l: Nat, mat: buffer.Buf (2, (⊤:Nat, ⊤:Nat), I32)] : mem.M 0;
+
+fun println_str_wrap {n: Nat} (mm: mem.M 0, str: «n; I8»): mem.M 0 =
+    ret (mm, ptr) = mem.slot («n; I8», 0) $ mm;
+    let mm = mem.store (mm, ptr, str);
+    let ptr = core.bitcast (mem.Ptr0 «⊤:Nat; I8») ptr;
+    ret mm = println_str $ (mm, ptr);
+    return mm;
+
+fun print_int_matrix_wrap (mm: mem.M 0, shape: [Nat, Nat], mat: buffer.Buf (2, shape, I32)) : mem.M 0 =
+    let mat = core.bitcast (buffer.Buf (2, (⊤:Nat, ⊤:Nat), I32)) mat;
+    ret mm = print_int_matrix $ (mm, shape#0_2, shape#1_2, mat);
+    return mm;
+
+lam nqueens (n: Nat): «n, 2; Idx n» =
+    ‹n, 2; 0: (Idx n)›;
+
+extern fun main(mm: mem.M 0, argc: I32, argv: mem.Ptr0 «⊤:Nat; mem.Ptr0 «⊤:Nat; I8» ») : [mem.M 0, I32] =
+    core.select (argc < 2I32, no_args, has_args) () where
+        con no_args () =
+            ret mm = println_str_wrap @19 $ (mm, "Usage: nqueens <n>\0");
+            return (mm, 1I32);
+        con has_args () =
+            let (mm, arg1) = mem.load (mm, mem.lea (argv, 1I32));
+            ret (mm, n) = atoi $ (mm, arg1);
+            let sol = nqueens (core.bitcast Nat n);
+            let shape = tensor.shape 2 sol;
+            let sol_i32 = ‹i: shape#0_2, j: shape#1_2; core.conv.u i32 sol#(i, j)›;
+            let (mm, buf) = buffer.init (2, shape, I32) (mm, sol_i32);
+            return (mm, 0I32);
+    end;

@@ -64,8 +64,8 @@ std::string Emitter::convert_impl(const Def* type, bool simd) {
     } else if (Idx::isa(type)) {
         // `Idx 1` is zero bits wide information-theoretically, but LLVM has no i0: clamp to i1
         // (its only value is 0, so any i1 zext/trunc of it stays correct).
-        auto w              = Idx::expect_bitwidth(type, "a statically-sized index type");
-        return types_[type] = "i" + std::to_string(std::max<nat_t>(1, w));
+        auto w              = Idx::size2bitwidth(Idx::as(type));
+        return types_[type] = "i" + std::to_string(std::max<nat_t>(1, w.value_or(64)));
     } else if (auto w = math::isa_f(type)) {
         switch (*w) {
             case 16: return types_[type] = "half";
@@ -362,6 +362,8 @@ std::string Emitter::emit_tuple(BB& bb, const std::string& name, const Def* tupl
 
         return s += simd_array ? ">" : is_array ? "]" : "}";
     }
+
+    if (tuple->isa<Pack>()) return "undef";
 
     std::string prev = "undef";
     auto t           = convert(tuple->type());
@@ -717,7 +719,7 @@ std::optional<std::string> Emitter::emit_core(BB& bb, const std::string& name, c
 
         auto size2width = [&](const Def* type) {
             if (type->isa<Nat>()) return 64_n;
-            if (Idx::isa(type)) return Idx::expect_bitwidth(type, "a statically-sized index type");
+            if (auto size = Idx::isa(type)) return Idx::size2bitwidth(size).value_or(64_n);
             return 0_n;
         };
 

@@ -1,0 +1,7 @@
+// RUN: (! %mim -p ll %s -X ll:o=- 2>&1) | %FileCheck %s
+
+plugin core;
+
+extern fun first (n: Nat, a: «n; I32»): I32 = return a#(core.bitcast (Idx n) 0I32);
+
+// CHECK: {{.*}}ll_dynamic_param.mim:5:1-5:82: error: ll backend: cannot pass a dynamically sized array by value to or from `first`; pass a `mem.Ptr` instead

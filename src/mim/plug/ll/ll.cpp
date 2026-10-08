@@ -299,10 +299,20 @@ void Emitter::emit_epilogue_impl(Lam* lam) {
         auto [pointee, addr_space] = Ta->projs<2>();
         auto [msize, ret]          = rest->projs<2>();
         emit_unsafe(msize->proj(2, 0)); // mem
-        // TODO array with size
         auto ret_lam = ret->expect_mut<Lam>("a mem.slot continuation");
         auto ptr     = ret_lam->var(2, 1);
-        auto v_ptr   = emit_slot(bb, app, pointee, addr_space);
+        std::string v_ptr;
+        if (detail::has_dynamic_size(pointee)) {
+            if (Lit::expect(addr_space, "an address space") != 0)
+                app->blame(MIM_LL_BE "cannot reserve a dynamically sized slot in address space `{}`", addr_space)
+                    .bail();
+            auto v_size = emit(msize->proj(2, 1));
+            auto slot   = "%" + app->unique_name() + ".slot";
+            std::print(bb.body().emplace_back(), "{}.i8 = alloca i8, i64 {}, align 16", slot, v_size);
+            v_ptr = bb.assign(slot, "bitcast i8* {}.i8 to {}", slot, convert(ptr->type()));
+        } else {
+            v_ptr = emit_slot(bb, app, pointee, addr_space);
+        }
         emit_phi(ret_lam, ptr, v_ptr, lam);
         return bb.tail("br label {}", id(ret_lam));
     } else if (Pi::isa_returning(app->callee_type())) { // function call
@@ -363,8 +373,6 @@ std::string Emitter::emit_tuple(BB& bb, const std::string& name, const Def* tupl
         return s += simd_array ? ">" : is_array ? "]" : "}";
     }
 
-    if (tuple->isa<Pack>()) return "undef";
-
     std::string prev = "undef";
     auto t           = convert(tuple->type());
     for (size_t src = 0, dst = 0, n = tuple->num_projs(); src != n; ++src) {
@@ -381,6 +389,45 @@ std::string Emitter::emit_tuple(BB& bb, const std::string& name, const Def* tupl
         }
     }
     return prev;
+}
+
+void Emitter::emit_fill(BB& bb, const std::string& name, const Def* ptr, const Pack* pack) {
+    if (pack->isa_mut())
+        pack->blame(MIM_LL_BE "cannot store index-dependent pack `{}` with a dynamic shape", pack).bail();
+    auto shape = pack->shape();
+    auto rank  = shape.rank();
+    if (!rank) pack->blame(MIM_LL_BE "cannot store pack `{}` of dynamic rank", pack).bail();
+
+    // The pointee's axes are contiguous, so the fill treats them as one flat run of `body` elements.
+    auto v_count = emit(shape[0]);
+    for (nat_t i = 1; i != *rank; ++i)
+        v_count = bb.assign(std::format("{}.count{}", name, i), "mul nuw i64 {}, {}", v_count, emit(shape[i]));
+
+    auto addr_space = Lit::expect(Axm::expect<mem::Ptr>(ptr->type(), "a `mem.Ptr`")->arg(2, 1), "an address space");
+    auto t_elem     = convert(pack->body()->type(), false);
+    auto t_ptr      = std::format("{} addrspace({})*", t_elem, addr_space);
+    auto fill       = std::format("@\"mim.fill.{}.{}\"", t_elem, addr_space);
+    fill_impls_.emplace(std::format("define internal void {}({} %p, i64 %n, {} %v) {{\n"
+                                    "entry:\n"
+                                    "    br label %head\n"
+                                    "head:\n"
+                                    "    %i = phi i64 [ 0, %entry ], [ %next, %body ]\n"
+                                    "    %cond = icmp ult i64 %i, %n\n"
+                                    "    br i1 %cond, label %body, label %exit\n"
+                                    "body:\n"
+                                    "    %q = getelementptr inbounds {}, {} %p, i64 %i\n"
+                                    "    store {} %v, {} %q\n"
+                                    "    %next = add nuw i64 %i, 1\n"
+                                    "    br label %head\n"
+                                    "exit:\n"
+                                    "    ret void\n"
+                                    "}}\n",
+                                    fill, t_ptr, t_elem, t_elem, t_ptr, t_elem, t_ptr));
+
+    auto v_ptr  = bb.assign(name + ".fill", "bitcast {} {} to {}", convert(ptr->type()), emit(ptr), t_ptr);
+    auto v_elem = emit(pack->body());
+    std::print(bb.body().emplace_back(), "call void {}({} {}, i64 {}, {} {})", fill, t_ptr, v_ptr, v_count, t_elem,
+               v_elem);
 }
 
 std::pair<std::string, std::string> Emitter::emit_gep_index(BB& bb, const std::string& name, const Def* index) {
@@ -692,8 +739,9 @@ std::optional<std::string> Emitter::emit_core(BB& bb, const std::string& name, c
         auto t_src = convert(conv->arg()->type());
         auto t_dst = convert(conv->type());
 
-        nat_t w_src = Idx::expect_bitwidth(conv->arg()->type(), "a `core.conv` source of known width");
-        nat_t w_dst = Idx::expect_bitwidth(conv->type(), "a `core.conv` target of known width");
+        auto width  = [](const Def* type) { return Idx::size2bitwidth(Idx::as(type)).value_or(64_n); };
+        nat_t w_src = width(conv->arg()->type());
+        nat_t w_dst = width(conv->type());
 
         if (w_src == w_dst) return v_src;
 
@@ -743,11 +791,40 @@ std::optional<std::string> Emitter::emit_mem(BB& bb, const std::string& name, co
         auto v_ptr     = emit(ptr);
         auto t_pointee = convert(pointee);
         auto t_ptr     = convert(ptr->type());
-        if (pointee->isa<Sigma>())
+        if (pointee->isa<Sigma>()) {
+            if (detail::has_dynamic_size(pointee))
+                lea->blame(MIM_LL_BE "cannot address a field of `{}`, which has a dynamic size", pointee).bail();
             return bb.assign(name, "getelementptr inbounds {}, {} {}, i64 0, i32 {}", t_pointee, t_ptr, v_ptr,
                              Lit::expect(i, "a struct-field index"));
+        }
 
-        pointee->expect<Arr>("an array as `mem.lea` pointee");
+        auto arr = pointee->expect<Arr>("an array as `mem.lea` pointee");
+        if (auto elem = arr->elem(); detail::has_dynamic_size(elem)) {
+            // LLVM's array type has no runtime stride, so step over `elem` in units of its static innermost element.
+            auto v_stride = std::string("1");
+            while (detail::has_dynamic_size(elem)) {
+                auto inner = elem->isa<Arr>();
+                auto rank  = inner ? inner->shape().rank() : std::nullopt;
+                if (!rank) lea->blame(MIM_LL_BE "cannot compute the stride of `{}`", elem).bail();
+                for (nat_t j = 0; j != *rank; ++j)
+                    v_stride = bb.assign(std::format("{}.stride{}", name, j), "mul nuw i64 {}, {}", v_stride,
+                                         emit(inner->shape()[j]));
+                elem = inner->body();
+            }
+
+            auto addr_space = Axm::as<mem::Ptr>(ptr->type())->arg(2, 1);
+            auto t_elem     = convert(elem, false);
+            auto t_base     = std::format("{} addrspace({})*", t_elem, addr_space);
+            auto v_base     = bb.assign(name + ".base", "bitcast {} {} to {}", t_ptr, v_ptr, t_base);
+            auto v_i        = emit(i);
+            if (auto t_i = convert(i->type()); t_i != "i64")
+                v_i = bb.assign(name + ".i64", "zext {} {} to i64", t_i, v_i);
+            auto v_off = bb.assign(name + ".off", "mul nuw i64 {}, {}", v_i, v_stride);
+            auto v_gep
+                = bb.assign(name + ".gep", "getelementptr inbounds {}, {} {}, i64 {}", t_elem, t_base, v_base, v_off);
+            return bb.assign(name, "bitcast {} {} to {}", t_base, v_gep, convert(lea->type()));
+        }
+
         auto [v_i, t_i] = emit_gep_index(bb, name, i);
 
         return bb.assign(name, "getelementptr inbounds {}, {} {}, i64 0, {} {}", t_pointee, t_ptr, v_ptr, t_i, v_i);
@@ -785,6 +862,10 @@ std::optional<std::string> Emitter::emit_mem(BB& bb, const std::string& name, co
         return bb.assign(name, "load {}, {} {}", t_pointee, t_ptr, v_ptr);
     } else if (auto store = Axm::isa<mem::store>(def)) {
         emit_unsafe(store->arg(3, 0));
+        if (auto pack = store->arg(3, 2)->isa<Pack>(); pack && detail::is_dynamic(pack->shape())) {
+            emit_fill(bb, name, store->arg(3, 1), pack);
+            return std::string();
+        }
         auto v_ptr = emit(store->arg(3, 1));
         auto v_val = emit(store->arg(3, 2));
         auto t_ptr = convert(store->arg(3, 1)->type());
@@ -1116,6 +1197,11 @@ std::optional<std::string> Emitter::emit_vec(BB& bb, const std::string& name, co
 
 std::string Emitter::emit_bb_impl(BB& bb, const Def* def) {
     if (auto lam = def->isa<Lam>()) return id(lam);
+
+    if (detail::has_dynamic_size(def->type()))
+        def->blame(MIM_LL_BE "cannot emit `{}` as a value: its type `{}` has a dynamic size and must stay in memory",
+                   def, def->type())
+            .bail();
 
     auto name = id(def);
     if (auto res = isa_targetspecific_intrinsic(bb, def)) return *std::move(res);

@@ -1,0 +1,37 @@
+// RUN: rm -f %{s:stem}.ll
+// RUN: %mim -p ll %s
+// RUN: clang %S/../lib.c %{s:stem}.ll -o %t -Wno-override-module
+// RUN: %t a b | %FileCheck %s
+
+plugin core;
+plugin mem;
+
+extern fun print_int_matrix [mem.M 0, k l: Nat, mem.Ptr0 «⊤:Nat, ⊤:Nat; I32»]: mem.M 0;
+
+fun show (k l: Nat) (m: mem.M 0, p: mem.Ptr0 «k, l; I32»): mem.M 0 =
+    ret m = print_int_matrix $ (m, k, l, core.bitcast (mem.Ptr0 «⊤:Nat, ⊤:Nat; I32») p);
+    return m;
+
+extern fun main(m: mem.M 0, argc: I32, argv: mem.Ptr0 «⊤:Nat; mem.Ptr0 «⊤:Nat; I8»»): [mem.M 0, I32] =
+    let n   = core.bitcast Nat argc;
+    let one = core.bitcast (Idx n) (core.wrap.sub 0 (argc, 2I32));
+    let (m, p) = mem.alloc («n, n; I32», 0) m;
+    let m = mem.store (m, p, ‹n, n; 4I32›);
+    ret m = show (n, n) $ (m, p);
+    ret (m, s) = mem.slot («n, n; I32», 0) $ m;
+    let m = mem.store (m, s, ‹n, n; 0I32›);
+    let m = mem.store (m, mem.lea (mem.lea (s, one), one), 7I32);
+    ret m = show (n, n) $ (m, s);
+    let (m, q) = mem.malloc («n, 3, n; I32», 0) (m, core.trait.size «n, 3, n; I32»);
+    let m = mem.store (m, q, ‹n, 3, n; 0I32›);
+    let m = mem.store (m, mem.lea (mem.lea (mem.lea (q, one), 2_3), one), 7I32);
+    ret m = show (core.nat.mul (n, 3), n) $ (m, core.bitcast (mem.Ptr0 «core.nat.mul (n, 3), n; I32») q);
+    return (m, 0I32);
+
+// CHECK-COUNT-3: 4, 4, 4,
+// CHECK-NEXT: 0, 0, 0,
+// CHECK-NEXT: 0, 7, 0,
+// CHECK-NEXT: 0, 0, 0,
+// CHECK-COUNT-5: 0, 0, 0,
+// CHECK-NEXT: 0, 7, 0,
+// CHECK-COUNT-3: 0, 0, 0,

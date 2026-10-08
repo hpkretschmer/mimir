@@ -1,0 +1,13 @@
+// RUN: (! %mim -p ll %s -X ll:o=- 2>&1) | %FileCheck %s
+
+plugin core;
+plugin mem;
+
+extern fun main(m: mem.M 0, argc: I32, argv: mem.Ptr0 «⊤:Nat; mem.Ptr0 «⊤:Nat; I8»»): [mem.M 0, I32] =
+    let n = core.bitcast Nat argc;
+    let (m, p) = mem.malloc («n; I32», 0) (m, core.trait.size «n; I32»);
+    let m = mem.store (m, p, ‹n; 3I32›);
+    let (m, a) = mem.load (m, p);
+    return (m, a#(core.bitcast (Idx n) argc));
+
+// CHECK: {{.*}}ll_dynamic_load.mim:10:18-10:32: error: ll backend: cannot emit `{{.*}}` as a value: its type `[mem.M 0, «n; I32»]` has a dynamic size and must stay in memory

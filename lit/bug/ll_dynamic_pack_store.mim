@@ -1,0 +1,30 @@
+// RUN: rm -f %{s:stem}.ll
+// RUN: %mim -p ll %s
+// RUN: clang %S/../lib.c %{s:stem}.ll -o %t -Wno-override-module
+// RUN: %t a b c d | %FileCheck %s
+
+plugin core;
+plugin mem;
+
+extern fun print_int_matrix [mem.M 0, k l: Nat, mem.Ptr0 «⊤:Nat, ⊤:Nat; I32»]: mem.M 0;
+
+fun show (k l: Nat) (m: mem.M 0, p: mem.Ptr0 «k, l; I32»): mem.M 0 =
+    ret m = print_int_matrix $ (m, k, l, core.bitcast (mem.Ptr0 «⊤:Nat, ⊤:Nat; I32») p);
+    return m;
+
+extern fun main(m: mem.M 0, argc: I32, argv: mem.Ptr0 «⊤:Nat; mem.Ptr0 «⊤:Nat; I8»»): [mem.M 0, I32] =
+    let n = core.bitcast Nat argc;
+    let (m, p) = mem.malloc («n, 2; I32», 0) (m, core.nat.mul (8, n));
+    let m = mem.store (m, p, ‹n, 2; 5I32›);
+    let m = mem.store (m, p, ‹n, 2; 0I32›);
+    ret m = show (n, 2) $ (m, p);
+    let m = mem.store (m, p, ‹n; (argc, 3I32)›);
+    ret m = show (n, 2) $ (m, p);
+    let (m, q) = mem.malloc («n, n; I32», 0) (m, core.nat.mul (4, core.nat.mul (n, n)));
+    let m = mem.store (m, q, ‹n, n; argc›);
+    ret m = show (n, n) $ (m, q);
+    return (m, 0I32);
+
+// CHECK-COUNT-5: 0, 0,
+// CHECK-COUNT-5: 5, 3,
+// CHECK-COUNT-5: 5, 5, 5, 5, 5,

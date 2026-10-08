@@ -1,0 +1,17 @@
+// RUN: (! %mim -p ll %s -X ll:o=- 2>&1) | %FileCheck %s
+
+plugin core;
+plugin mem;
+
+extern fun main(m: mem.M 0, argc: I32, argv: mem.Ptr0 «⊤:Nat; mem.Ptr0 «⊤:Nat; I8»»): [mem.M 0, I32] =
+    let n = core.bitcast Nat argc;
+    loop (‹n; argc›, 0I32)
+    where
+        con loop (buf: «n; I32», i: I32) = core.select (core.icmp.ul (i, argc), next, exit) ()
+        where
+            con next () = loop (buf#(core.bitcast (Idx n) i) ← i, core.wrap.add 0 (i, 1I32));
+            con exit () = return (m, buf#(core.bitcast (Idx n) 0I32));
+        end
+    end;
+
+// CHECK: {{.*}}ll_dynamic_pack.mim:{{.*}}: error: ll backend: cannot emit `‹n; argc›` as a value: its type `«n; I32»` has a dynamic size and must stay in memory

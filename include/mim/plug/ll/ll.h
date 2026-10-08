@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <bit>
 #include <deque>
 #include <format>
@@ -75,6 +76,23 @@ inline const Def* isa_mem_sigma_2(const Def* type) {
     if (auto sigma = type->isa<Sigma>())
         if (sigma->num_ops() == 2 && Axm::isa<mem::M>(sigma->op(0))) return sigma->op(1);
     return {};
+}
+
+inline bool is_dynamic(Shape shape) {
+    if (auto rank = shape.rank()) {
+        for (nat_t i = 0; i != *rank; ++i)
+            if (!Lit::isa(shape[i])) return true;
+        return false;
+    }
+    return true;
+}
+
+/// Does @p type contain an array whose extent is only known at runtime?
+/// Such a type has no LLVM value representation and may only be the pointee of a `mem.Ptr`.
+inline bool has_dynamic_size(const Def* type) {
+    if (auto arr = type->isa<Arr>()) return is_dynamic(arr->shape()) || has_dynamic_size(arr->body());
+    if (auto sigma = type->isa<Sigma>()) return std::ranges::any_of(sigma->ops(), has_dynamic_size);
+    return false;
 }
 } // namespace detail
 
@@ -263,6 +281,7 @@ protected:
     std::ostringstream vars_decls_;
     std::ostringstream func_decls_;
     std::ostringstream func_impls_;
+    std::set<std::string> fill_impls_;
     LamMap<const Def*> simd_phi_;
 
     /// Loop-metadata node id per `ll.vec`/`ll.novec`-annotated loop header, and whether it may vectorize;
@@ -285,6 +304,7 @@ private:
     // Case groups of emit_bb_impl, split so one recursion level only pays the frame of the group it hits.
     MIM_NOINLINE std::string emit_lit(const Def*);
     MIM_NOINLINE std::string emit_tuple(BB&, const std::string& name, const Def* tuple);
+    MIM_NOINLINE void emit_fill(BB&, const std::string& name, const Def* ptr, const Pack* pack);
     MIM_NOINLINE std::pair<std::string, std::string> emit_gep_index(BB&, const std::string& name, const Def* index);
     MIM_NOINLINE std::optional<std::string> emit_builtin(BB&, const std::string& name, const Def*);
     MIM_NOINLINE std::optional<std::string> emit_core(BB&, const std::string& name, const Def*);
@@ -408,6 +428,11 @@ inline void Emitter::start() {
     section(vars_decls_.str());
     section(func_impls_.str());
 
+    std::ostringstream fills;
+    for (auto&& fill : fill_impls_)
+        std::println(fills, "{}", fill);
+    section(fills.str());
+
     // One distinct `!llvm.loop` node per hinted loop header, sharing the vectorize-enable or -disable hint.
     if (!loop_md_.empty()) {
         std::ostringstream md_decls;
@@ -477,6 +502,11 @@ inline bool Emitter::load_rt_module(std::string_view filename) {
 }
 
 inline void Emitter::emit_imported(Lam* lam) {
+    if (detail::has_dynamic_size(lam->dom()) || detail::has_dynamic_size(lam->type()->ret_pi()->dom()))
+        lam->blame(MIM_LL_BE "cannot pass a dynamically sized array by value to or from `{}`; pass a `mem.Ptr` instead",
+                   lam)
+            .bail();
+
     // TODO merge with declare method
     std::print(func_decls_, "declare {} {}(", convert_ret_pi(lam->type()->ret_pi()), id(lam));
 
@@ -491,6 +521,13 @@ inline void Emitter::emit_imported(Lam* lam) {
 }
 
 inline std::string Emitter::prepare() {
+    if (detail::has_dynamic_size(root()->dom()) || detail::has_dynamic_size(root()->type()->ret_pi()->dom()))
+        root()
+            ->blame(MIM_LL_BE
+                    "cannot pass a dynamically sized array by value to or from `{}`; pass a `mem.Ptr` instead",
+                    root())
+            .bail();
+
     auto internal = root()->is_external() ? "" : "internal ";
     auto ret_t    = convert_ret_pi(root()->type()->ret_pi());
     std::print(func_impls_, "define {}{} {}(", internal, ret_t, id(root()));

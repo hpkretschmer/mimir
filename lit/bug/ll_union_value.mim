@@ -1,0 +1,11 @@
+// RUN: rm -f %{s:stem}.ll
+// RUN: %mim -p ll %s
+plugin core;
+plugin mem;
+plugin option;
+
+lam mk (n: Nat)@ff: option.Opt I32 =
+    core.select (core.ncmp.e (n, 0), option.some 7I32, mk (core.nat.sub (n, 1)));
+
+extern fun f (mm: mem.M 0, n: Nat): [mem.M 0, I32] =
+    return (mm, option.unwrap_or (mk n) 0I32);

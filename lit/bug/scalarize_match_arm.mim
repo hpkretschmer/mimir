@@ -1,0 +1,13 @@
+// RUN: %mim -p opt %s -o - | %FileCheck %s
+// CHECK: extern con f
+plugin core;
+plugin mem;
+plugin option;
+
+lam mk (n: Nat)@ff: option.Opt «2, 2; I32» =
+    core.select (core.ncmp.e (n, 0), option.some ‹2, 2; 7I32›, mk (core.nat.sub (n, 1)));
+
+extern fun f (mm: mem.M 0, n: Nat): [mem.M 0, I32] =
+    match mk n with
+        | _: [] => return (mm, 0I32)
+        | x: «2, 2; I32» => return (mm, x#(1_2, 0_2));

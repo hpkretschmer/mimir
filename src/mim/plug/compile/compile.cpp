@@ -11,12 +11,12 @@
 #include <mim/phase/branch_normalize.h>
 #include <mim/phase/eta_conv.h>
 #include <mim/phase/lam_spec.h>
+#include <mim/phase/nom_erasure.h>
 #include <mim/phase/ret_wrap.h>
 #include <mim/phase/scalarize.h>
 #include <mim/phase/sccp.h>
 #include <mim/phase/single_erasure.h>
 #include <mim/phase/static_arg_opt.h>
-#include <mim/phase/unload.h>
 
 #include "mim/plug/compile/autogen.h"
 
@@ -33,7 +33,7 @@ public:
     Named(World& w, flags_t a)
         : Phase(w, a) {}
 
-    void start() final { fe::unreachable(); } // a Named always redirects and never runs itself
+    void start() final { std::unreachable(); } // a Named always redirects and never runs itself
 
     void apply(const App* app) final {
         if (!app) return;
@@ -64,8 +64,8 @@ static void reg_phases(Flags2Phases& phases) {
     Phase::hook<compile::eta_conv,         EtaConv        >(phases);
     Phase::hook<compile::lam_spec,         LamSpec        >(phases);
     Phase::hook<compile::named,            Named          >(phases);
+    Phase::hook<compile::nom_erasure,      NomErasure     >(phases);
     Phase::hook<compile::phases,           PhaseMan       >(phases);
-    Phase::hook<compile::unload,           Unload         >(phases);
     Phase::hook<compile::ret_wrap,         RetWrap        >(phases);
     Phase::hook<compile::scalarize,        Scalarize      >(phases);
     Phase::hook<compile::sccp,             SCCP           >(phases);

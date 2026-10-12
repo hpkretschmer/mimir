@@ -74,6 +74,8 @@
               K_axm:    \
     case Tag::K_let:    \
     case Tag::K_mod:    \
+    case Tag::K_mutual: \
+    case Tag::K_nom:    \
     case Tag::K_rec:    \
     case Tag::K_use:    \
     case Tag::C_IMPORT: \

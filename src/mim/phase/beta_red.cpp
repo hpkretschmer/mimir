@@ -3,16 +3,24 @@
 namespace mim {
 
 bool BetaRed::analyze() {
-    for (auto def : world().roots())
+    for (auto def : old_world().externals().muts())
         visit(def, false);
     return false; // no fixed-point nccessary
 }
 
 void BetaRed::analyze(const Def* def) {
-    if (auto [_, ins] = analyzed_.emplace(def); !ins) return;
+    if (auto [_, ins] = analyzed_.emplace(def); !ins) {
+        // Back edge: this shared occurrence lies within the Lam%s it calls, so inlining it makes no progress.
+        if (on_stack_.contains(def))
+            for (auto mut : def->local_muts())
+                if (auto lam = mut->isa<Lam>()) candidates_[lam] = false;
+        return;
+    }
 
+    on_stack_.emplace(def);
     for (auto d : def->deps())
         visit(d, true);
+    on_stack_.erase(def);
 }
 
 void BetaRed::visit(const Def* def, bool candidate) {
@@ -35,7 +43,7 @@ const Def* BetaRed::rewrite_imm_App(const App* app) {
         return rewrite(old_lam->body());
     }
 
-    return Rewriter::rewrite_imm_App(app);
+    return RWPhase::rewrite_imm_App(app);
 }
 
 } // namespace mim

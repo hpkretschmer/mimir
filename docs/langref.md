@@ -60,7 +60,7 @@ Some tokens have a second spelling - an ASCII-only one or a Unicode variant - th
 
 - `.` is the separator of a [path](@ref path), e.g. `affine.Idx` or `core.nat.rem`.
 - `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `<<`, and `>>` are [infix operators](@ref infix).
-- `#` is an infix operator after an expression and a prefix one everywhere else; see [Singletons](@ref single).
+- `#` is an infix operator after an expression and a prefix one everywhere else; see [Singletons](@ref single) and [Nominal Newtypes](@ref nominal).
 
 #### Secondary Terminals
 
@@ -79,9 +79,9 @@ Some tokens have a second spelling - an ASCII-only one or a Unicode variant - th
 
 ```text
 Bool Cn Fn I1 I8 I16 I32 I64 Idx Nat Rule Type Univ
-and anx as axm cn con end extern ff fn fun
-i1 i8 i16 i32 i64 import inj lam let match mod
-norm plugin priv pub rec ret rule tt use when where with
+anx as axm cn con end extern ff fn fun
+i1 i8 i16 i32 i64 import inj lam let match mod mutual
+nom norm plugin priv pub rec ret rule tt use when where with
 ```
 
 </div>
@@ -235,18 +235,18 @@ Either one nudges the default visibility to `pub` (instead of the usual `priv` d
 ```ebnf
 d      ::= vis? import (I | S) ("as" (I | "*"))? ";"
         |  vis? "use"  path    ("as" (I | "*"))? ";"
-        |  vis? "mod" I "{" d* "}"
+        |  vis? "mod" I d* "end"
         |  vis? "anx"? "let" p "=" e
         |  vis? "anx" I "=" path
-        |  vis? ("extern" | "anx")? lam I dom+ (":" e)? "=" e and*
+        |  vis? ("extern" | "anx")? lam I dom+ (":" e)? "=" e
         |  vis?  "extern"          lam I fwd+ (":" e)? ";"
-        |  vis? "anx"? "rec" I "=" e and*
+        |  vis? "anx"? "rec" I "=" e
+        |  vis? "anx"? "nom" I "=" e
+        |  vis? ("extern" | "anx")? "mutual" d* "end"
         |  vis? "axm" axm
         |  vis? ("rule" | "norm") I p ":" e ("when" e)? "=>" e
 
 import ::= "import" | "plugin"
-and    ::= "and" I "=" e
-        |  "and" lam I dom+ (":" e)? "=" e
 vis    ::= "priv" | "pub"
 lam    ::= "lam" | "con" | "fun"
 dom    ::= p ("@" e)?
@@ -267,13 +267,16 @@ tail   ::= ("," I)? ("," L ("," L)?)?
 - `anx I = path` declares `I` as an alias for the annex denoted by `path`.
 - `lam`, `con`, and `fun` declare lambdas, continuations, and returning continuations.
   The declared name is already in scope inside its own body, so such a declaration is recursive.
-  `and` extends the group to mutual recursion; a forward reference without `and` does not resolve.
+  A forward reference only resolves within a `mutual` block.
   The corresponding [expression forms](@ref expr) are anonymous and cannot refer to themselves.
 - The `@` of a `dom` introduces its partial-evaluation filter.
-- `rec` starts a recursive declaration group, and `and` extends the same group.
+- `rec` declares a recursive type.
   Its body must be a sigma, a [variant](@ref variant), or a function type, as those are built as a mutable and filled in afterwards, so that `I` is already in scope inside it; its universe level is inferred from the body.
   A recursive _function_ is declared with `lam`/`con`/`fun` instead.
-- After `and`, the next declaration may be another `rec`-style binding or an explicit `lam`, `con`, or `fun` declaration; an `and`-continuation doesn't accept its own modifiers.
+- `nom` declares a [nominal newtype](@ref nominal); like `rec`, it is in scope inside its own body, but its body may be any type.
+- `mutual` ... `end` groups declarations that may refer to each other, as in Lean.
+  Its members must be `rec`, `nom`, `lam`, `con`, or `fun` declarations.
+  Modifiers on `mutual` apply to every member; a member's own `priv`/`pub` overrides the group's.
 - `axm` declares an axiom.
   A `tag` list declares several axioms of the same type at once, and each `= I` adds another name for that tag.
   Prefixed with a name as in `axm nat.(add, sub): ...`, the tags become members of a module of that name.
@@ -528,7 +531,7 @@ arm ::= (I | L) p? "=>" e
 - `| I₀: e₀ | ... | Iₙ₋₁: eₙ₋₁` forms a variant type: a sum whose cases are _positional_.
   A constructor without `: e` carries `[]`, and a lone `|` is the empty variant.
 - Unlike `∪`, nothing is sorted, deduplicated, or flattened: `| A | B | C` has three cases where `[] ∪ [] ∪ []` is just `[]`, and `| A: Nat | B: Nat` keeps both.
-- A variant is a type like any other and may be anonymous; `rec` makes it recursive, and `and` mutually recursive.
+- A variant is a type like any other and may be anonymous; `rec` makes it recursive, and a `mutual` block mutually recursive.
 - Its last payload extends as far right as it can, and `|` never starts an application argument: write `f (| A | B)`, and parenthesize a variant inside a `match` arm.
 - `T#I` or `T#n` on a variant type `T` selects a case by constructor name or by index, counting from `0`.
   That is a value for a `[]` payload, and a function from the payload into `T` otherwise.
@@ -566,6 +569,27 @@ e   ::= "«" e "»"
 - The `;` is what tells an [array or pack](@ref prod) from a singleton - `«n; T»` is an array, `«T»` a singleton.
 - Because `#` is also the [Extract](@ref prod) operator, it is a prefix only where an expression starts:
   `f #x` extracts rather than applies, so pass a singleton as `f (#x)`.
+
+#### Nominal Newtypes {#nominal}
+
+A `nom` declaration is the one place where Mim is not structurally typed: two `nom`s over the same underlying type are still distinct types.
+
+- `nom I = e` declares `I` as a fresh type that wraps `e`; it is the declaration - not the shape of `e` - that tells two `nom`s apart.
+- If `e` is a sigma, a [variant](@ref variant), or a function type, `I` is already in scope inside `e`, so such a `nom` may be recursive, and a `mutual` block makes a group of them mutually recursive.
+- `anx nom` additionally makes `I` an [annex](@ref annex).
+- `e inj I` wraps a value of the underlying type into `I`, and the prefix `#` unwraps it again, so `#(e inj I)` is `e`.
+- `inj` and `#` on a `nom` are private to the `mod` that declares the `nom` - or its file, outside of any `mod` -, whatever its visibility; the _type_ crosses a module boundary like any other, so an importer sees it as abstract and has to go through whatever the declaring module exports.
+
+```mim
+nom Meter = I32;
+nom Foot  = I32;
+
+lam to_foot (m: Meter): Foot = #m inj Foot; // Meter and Foot do not unify
+
+nom List = | Nil | Cons: [I32, List];
+```
+
+@note A `--output-mim` dump flattens a program into one file, so a wrapping that an inliner carried across a module boundary lands in a dump that no longer re-parses.
 
 #### Infix Operators {#infix}
 
@@ -790,7 +814,7 @@ While the `World` is frozen, a rule that would have to build a new node bails ou
 - an empty join is `⊥`, and a one-element one is its operand
 - `x inj T` -> `x` if `T` is not a union type
 - `match (T inj x) with ...` -> the arm handling `T` - a constructor fixes the active case
-- each case is handled by the **first** arm accepting it, so the arms are *not* sorted; an arm accepts a case if its domain is that case, or a union containing it
+- each case is handled by the **first** arm accepting it, so the arms are _not_ sorted; an arm accepts a case if its domain is that case, or a union containing it
 - a `match` whose scrutinee is not a union is the degenerate one-case union and reduces right away
 - an arm handling no case is dropped; a case handled by no arm is an error
 
@@ -802,8 +826,12 @@ While the `World` is frozen, a rule that would have to build a new node bails ou
 
 ### Singletons
 
-- `#x` -> `e` for every `x: «e»` - the inhabitant is read off the *type*, so the var of a `λ (x: «e»)` never occurs in the body
+- `#x` -> `e` for every `x: «e»` - the inhabitant is read off the _type_, so the var of a `λ (x: «e»)` never occurs in the body
 - `#‹e›` -> `e` - a special case of the above; a singleton elimination is therefore never built
+
+### Nominal Newtypes
+
+- `#(e inj T)` -> `e`; on an opaque value the unwrapping stays
 
 ### Universes
 

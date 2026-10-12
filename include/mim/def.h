@@ -41,6 +41,7 @@
     X(Top,    Judge::Intro) X(Bot,   Judge::Intro)                                                                 \
     X(Reform, Judge::Form ) X(Rule,  Judge::Intro)                                                                 \
     X(Single, Judge::Form ) X(Wrap,  Judge::Intro)                                                                 \
+    X(Nom,    Judge::Form ) X(Name,  Judge::Intro) X(Struc,   Judge::Elim)                                         \
     X(Nat,    Judge::Form )                                                                                        \
     X(Idx,    Judge::Intro)
 
@@ -59,7 +60,8 @@
     X(Reform) X(Rule)                                                                                              \
     X(Single) X(Wrap)                                                                                              \
     X(Nat)                                                                                                         \
-    X(Idx)
+    X(Idx)                                                                                                         \
+    X(Nom)    X(Name)  X(Struc)
 
 #define MIM_MUT_NODE(X)                                                                                            \
     X(Global)                                                                                                      \
@@ -260,11 +262,10 @@ public:
 };
 
 /// Options for Def::dot, World::dot, and Nest::dot.
-/// @note Def::dot and World::dot honor DotConfig::max; World::dot also honors DotConfig::all_annexes.
+/// @note Def::dot and World::dot honor DotConfig::max.
 /// Nest::dot only honors DotConfig::dark.
 struct DotConfig {
     int max             = std::numeric_limits<int>::max(); ///< Maximum recursion depth.
-    bool all_annexes    = false;                           ///< Include all annexes - even if unused (World::dot only).
     bool follow_types   = false;                           ///< Follow Def::type() dependencies.
     bool inline_consts  = false; ///< Wire up literals, axioms, etc. with normal edges instead of detaching them.
     bool default_filter = false; ///< Show Lam::filter() even if it has its default value.
@@ -285,6 +286,7 @@ struct DotConfig {
 /// | Sigma / Arr       | Tuple / Pack      | Extract           |
 /// |                   | Insert            | Insert            |
 /// | Single            | Wrap              |                   |
+/// | Nom               | Name              | Struc             |
 /// | Join              | Inj               | Match             |
 /// | Variant           | Inj               | Match             |
 /// | Reform            | Rule              |                   |

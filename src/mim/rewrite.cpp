@@ -2,6 +2,7 @@
 
 #include <fe/assert.h>
 
+#include "mim/driver.h"
 #include "mim/world.h"
 
 // Don't use fancy C++-lambdas; it's way too annoying stepping through them in a debugger.
@@ -55,7 +56,7 @@ const Def* Rewriter::rewrite_imm(const Def* old_def) {
     const Def* new_def;
     switch (old_def->node()) {
         MIM_IMM_NODE(CODE_IMM)
-        default: fe::unreachable();
+        default: std::unreachable();
     }
     return map(old_def, new_def);
 }
@@ -64,7 +65,7 @@ const Def* Rewriter::rewrite_mut(Def* old_mut) {
     const Def* new_def;
     switch (old_mut->node()) {
         MIM_MUT_NODE(CODE_MUT)
-        default: fe::unreachable();
+        default: std::unreachable();
     }
     return new_def;
 }
@@ -81,23 +82,26 @@ DefVec Rewriter::rewrite(Defs ops) {
 
 #ifndef DOXYGEN
 // clang-format off
-const Def* Rewriter::rewrite_imm_Idx   (const Idx*     ) { return world().type_idx(); }
-const Def* Rewriter::rewrite_imm_Nat   (const Nat*     ) { return world().type_nat(); }
-const Def* Rewriter::rewrite_imm_Univ  (const Univ*    ) { return world().univ();     }
-const Def* Rewriter::rewrite_imm_Lit   (const Lit*    d) { return world().lit   (rewrite(d->type()),   d->get());    }
-const Def* Rewriter::rewrite_imm_Match (const Match*  d) { return world().match (rewrite(d->ops()));                 }
-const Def* Rewriter::rewrite_imm_Reform(const Reform* d) { return world().reform(rewrite(d->dom()));                 }
-const Def* Rewriter::rewrite_imm_Sigma (const Sigma*  d) { return world().sigma (rewrite(d->ops()));                 }
-const Def* Rewriter::rewrite_imm_Type  (const Type*   d) { return world().type  (rewrite(d->level()));               }
-const Def* Rewriter::rewrite_imm_UInc  (const UInc*   d) { return world().uinc  (rewrite(d->op()),     d->offset()); }
-const Def* Rewriter::rewrite_imm_UMax  (const UMax*   d) { return world().umax  (rewrite(d->ops()));                 }
-const Def* Rewriter::rewrite_imm_Single(const Single* d) { return world().single(rewrite(d->op()));                  }
-const Def* Rewriter::rewrite_imm_Wrap  (const Wrap*   d) { return world().wrap  (rewrite(d->op())); }
-const Def* Rewriter::rewrite_imm_Var   (const Var*    d) { return world().var   (rewrite(d->binder())->as_mut());    }
-const Def* Rewriter::rewrite_imm_Top   (const Top*    d) { return world().top   (rewrite(d->type()));                }
-const Def* Rewriter::rewrite_imm_Bot   (const Bot*    d) { return world().bot   (rewrite(d->type()));                }
-const Def* Rewriter::rewrite_imm_Join  (const Join*   d) { return world().join  (rewrite(d->ops()));                 }
-const Def* Rewriter::rewrite_imm_Variant(const Variant* d) { return world().variant(rewrite(d->ops()));              }
+const Def* Rewriter::rewrite_imm_Idx    (const Idx*      ) { return world().type_idx();                                   }
+const Def* Rewriter::rewrite_imm_Nat    (const Nat*      ) { return world().type_nat();                                   }
+const Def* Rewriter::rewrite_imm_Univ   (const Univ*     ) { return world().univ();                                       }
+const Def* Rewriter::rewrite_imm_Lit    (const Lit*     d) { return world().lit    (rewrite(d->type()),   d->get());      }
+const Def* Rewriter::rewrite_imm_Match  (const Match*   d) { return world().match  (rewrite(d->ops()));                   }
+const Def* Rewriter::rewrite_imm_Reform (const Reform*  d) { return world().reform (rewrite(d->dom()));                   }
+const Def* Rewriter::rewrite_imm_Sigma  (const Sigma*   d) { return world().sigma  (rewrite(d->ops()));                   }
+const Def* Rewriter::rewrite_imm_Type   (const Type*    d) { return world().type   (rewrite(d->level()));                 }
+const Def* Rewriter::rewrite_imm_UInc   (const UInc*    d) { return world().uinc   (rewrite(d->op()),     d->offset());   }
+const Def* Rewriter::rewrite_imm_UMax   (const UMax*    d) { return world().umax   (rewrite(d->ops()));                   }
+const Def* Rewriter::rewrite_imm_Single (const Single*  d) { return world().single (rewrite(d->op()));                    }
+const Def* Rewriter::rewrite_imm_Wrap   (const Wrap*    d) { return world().wrap   (rewrite(d->op()));                    }
+const Def* Rewriter::rewrite_imm_Nom    (const Nom*     d) { return world().nom    (d->key(),             rewrite(d->op())); }
+const Def* Rewriter::rewrite_imm_Name   (const Name*    d) { return world().name   (rewrite(d->nom()), rewrite(d->op())); }
+const Def* Rewriter::rewrite_imm_Struc  (const Struc*   d) { return world().struc  (rewrite(d->op()));                    }
+const Def* Rewriter::rewrite_imm_Var    (const Var*     d) { return world().var    (rewrite(d->binder())->as_mut());      }
+const Def* Rewriter::rewrite_imm_Top    (const Top*     d) { return world().top    (rewrite(d->type()));                  }
+const Def* Rewriter::rewrite_imm_Bot    (const Bot*     d) { return world().bot    (rewrite(d->type()));                  }
+const Def* Rewriter::rewrite_imm_Join   (const Join*    d) { return world().join   (rewrite(d->ops()));                   }
+const Def* Rewriter::rewrite_imm_Variant(const Variant* d) { return world().variant(rewrite(d->ops()));                   }
 
 const Def* Rewriter::rewrite_imm_Arr (const Arr*  d) { return rewrite_imm_Seq(d); }
 const Def* Rewriter::rewrite_imm_Pack(const Pack* d) { return rewrite_imm_Seq(d); }
@@ -170,17 +174,14 @@ const Def* Rewriter::rewrite_mut_Rule(Rule* d) {
 }
 
 const Def* Rewriter::rewrite_mut_Pi(Pi* d) {
-    if (d->is_immutabilizable()) return rewrite_imm_Pi(d);
     return rewrite_stub(d, world().mut_pi(rewrite(d->type()), d->is_implicit()));
 }
 
 const Def* Rewriter::rewrite_mut_Sigma(Sigma* d) {
-    if (d->is_immutabilizable()) return rewrite_imm_Sigma(d);
     return rewrite_stub(d, world().mut_sigma(rewrite(d->type()), d->num_ops()));
 }
 
 const Def* Rewriter::rewrite_mut_Variant(Variant* d) {
-    if (d->is_immutabilizable()) return rewrite_imm_Variant(d);
     return rewrite_stub(d, world().mut_variant(rewrite(d->type()), d->num_ops()));
 }
 
@@ -218,12 +219,7 @@ const Def* Rewriter::rewrite_imm_Seq(const Seq* seq) {
 }
 
 const Def* Rewriter::rewrite_mut_Seq(Seq* seq) {
-    if (seq->is_immutabilizable()) return rewrite_imm_Seq(seq);
-
-    if (!seq->is_set()) {
-        auto new_seq = world().mut_seq(seq->is_intro(), rewrite(seq->type()));
-        return map(seq, new_seq);
-    }
+    if (!seq->is_set()) return rewrite_stub(seq, world().mut_seq(seq->is_intro(), rewrite(seq->type())));
 
     auto new_shape = rewrite(*seq->shape())->zonk();
     auto l         = seq->shape().is_fused() ? std::nullopt : Lit::isa(new_shape);
@@ -240,7 +236,6 @@ const Def* Rewriter::rewrite_mut_Seq(Seq* seq) {
         return map(seq, world().prod(seq->is_intro(), new_ops));
     }
 
-    if (!seq->has_var()) return map(seq, world().seq(seq->is_intro(), new_shape, rewrite(seq->body())));
     return rewrite_stub(seq, world().mut_seq(seq->is_intro(), rewrite(seq->type())));
 }
 
@@ -252,7 +247,7 @@ const Def* Rewriter::rewrite_stub(Def* old_mut, Def* new_mut) {
     for (size_t i = 0, e = old_mut->num_ops(); i != e; ++i)
         new_mut->set(i, rewrite(old_mut->op(i)));
 
-    return seal_stub(old_mut, new_mut);
+    return seal(old_mut, new_mut);
 }
 
 const Def* Rewriter::rewrite_stub(Def* old_mut, Def* new_mut, fe::View<size_t> new2old) {
@@ -264,12 +259,12 @@ const Def* Rewriter::rewrite_stub(Def* old_mut, Def* new_mut, fe::View<size_t> n
     for (size_t i = 0, e = new2old.size(); i != e; ++i)
         new_mut->set(i, rewrite(old_mut->op(new2old[i])));
 
-    return seal_stub(old_mut, new_mut);
+    return seal(old_mut, new_mut);
 }
 
-const Def* Rewriter::seal_stub(Def* old_mut, Def* new_mut) {
-    // Even when the old binder was not immutabilizable, rewriting may have made the new one vacuous.
-    if (new_mut->is_immutabilizable())
+const Def* Rewriter::seal(Def* old_mut, Def* new_mut) {
+    // A stub that something already captured must stay, or the capture and its users disagree on which Def it is.
+    if (new_mut->users().empty() && new_mut->is_immutabilizable())
         if (auto new_imm = new_mut->immutabilize()) return map(old_mut, new_imm);
     return new_mut;
 }
@@ -358,6 +353,16 @@ const Def* Zonker::rewire_mut(Def* mut) {
     if (auto new_imm = mut->immutabilize()) return map(mut, new_imm);
 
     return mut;
+}
+
+/*
+ * Importer
+ */
+
+const Def* Importer::rewrite(const Def* def) {
+    if (auto new_def = lookup(def)) return new_def;
+    if (auto flags = world().driver().library()->annexes().flags(def)) return map(def, world().annex(*flags));
+    return Rewriter::rewrite(def);
 }
 
 } // namespace mim

@@ -37,16 +37,19 @@ public:
         scopes_.pop_back();
     }
 
+    struct Barrier {
+        size_t scopes, mods;
+    };
+
     /// A file must not see the scope of whoever imports it, so its Scope becomes the new lookup floor.
-    size_t push_barrier(Scope& scope) {
+    Barrier push_barrier(Scope& scope) {
         push(scope);
-        auto old = std::exchange(barrier_, scopes_.size() - 1);
-        mod_stack_.clear();
-        return old;
+        return {std::exchange(barrier_, scopes_.size() - 1), std::exchange(mod_barrier_, mod_stack_.size())};
     }
 
-    void pop_barrier(size_t old) {
-        barrier_ = old;
+    void pop_barrier(Barrier old) {
+        barrier_     = old.scopes;
+        mod_barrier_ = old.mods;
         pop();
     }
 
@@ -55,8 +58,8 @@ public:
     ///@{
     void push_mod(Sym name) { mod_stack_.emplace_back(name); }
     void pop_mod() { mod_stack_.pop_back(); }
-    size_t mod_depth() const { return mod_stack_.size(); }
-    Sym enclosing_mod() const { return mod_stack_.empty() ? Sym() : mod_stack_.back(); }
+    size_t mod_depth() const { return mod_stack_.size() - mod_barrier_; }
+    Sym enclosing_mod() const { return mod_depth() == 0 ? Sym() : mod_stack_.back(); }
     ///@}
 
     const Decl* find(Dbg dbg, bool quiet = false) {
@@ -80,7 +83,7 @@ public:
     }
 
     /// Diagnostic-only: is a module named @p sym reachable, shadowed by whatever `find` would actually return?
-    /// Only `ModDecl`/`Import` ever yield a non-null Decl::scope, so this never confuses a value for a module.
+    /// Only a module - a ModDecl, an Import, or an AxmDecl family - yields a non-null Decl::scope.
     const Decl* find_shadowed_module(Sym sym) {
         for (auto& frame : scopes_ | std::views::drop(barrier_) | std::views::reverse)
             if (auto bind = fe::lookup(frame.scope(), sym); bind && bind->decl->scope()) return bind->decl;
@@ -129,8 +132,9 @@ private:
     AST& ast_;
     Ptr<DummyDecl> dummy_;
     fe::Vector<Frame> scopes_;
-    size_t barrier_ = 0;
     fe::Vector<Sym> mod_stack_;
+    size_t barrier_     = 0;
+    size_t mod_barrier_ = 0;
 };
 
 /*
@@ -370,38 +374,63 @@ AnnexInfo* AST::name2annex(Scopes& s, Dbg dbg, sub_t* sub_id) {
     return annex;
 }
 
+/// Registers @p alias as a further name of the annex slot @p target introduced.
+static void add_alias(AnnexInfo* annex, sub_t sub, Sym target, Sym alias) {
+    // An ungrouped target (the common case) never allocated its own sub-group; seed one now,
+    // named after the target itself, so this alias has a slot to share.
+    if (sub >= annex->subs.size()) {
+        assert(sub == annex->subs.size());
+        annex->subs.emplace_back(fe::Vector<Sym>{target});
+    }
+    annex->subs[sub].emplace_back(alias);
+}
+
 void AxmDecl::bind(Scopes& s) const {
     type()->bind(s);
+    auto pi = type()->isa<PiExpr>() || InfixExpr::isa_op(Tag::T_arrow_r, type());
 
-    annex_ = s.ast().name2annex(s, dbg(), &sub_);
+    if (members_) {
+        s.push(*members_);
+        s.push_mod(mod_.sym());
+    }
 
-    if (annex_ && annex_->fresh) {
-        annex_->normalizer = normalizer();
-        annex_->pi         = type()->isa<PiExpr>() || InfixExpr::isa_op(Tag::T_arrow_r, type());
-    } else if (annex_) {
-        auto pi = type()->isa<PiExpr>() || InfixExpr::isa_op(Tag::T_arrow_r, type());
-        if (pi ^ *annex_->pi)
-            s.error().e(dbg().loc(),
-                        "all declarations of annex `{}` must be function types if one of them is (they share one "
-                        "annex tag - via mod-nesting or a `tag.(...)` family - and must agree in shape)",
-                        dbg().sym());
+    for (auto name : names()) {
+        auto dbg    = name->dbg();
+        auto& annex = name->annex_ = s.ast().name2annex(s, dbg, &name->sub_);
 
-        if (annex_->normalizer.sym() != normalizer().sym()) {
-            auto l    = normalizer().loc() ? normalizer().loc() : loc().anew_end();
-            auto& err = s.error().e(l, "normalizer mismatch for axm `{}`", dbg());
-            if (auto norm = annex_->normalizer)
-                err.n(norm.loc(), "previous normalizer `{}` declared here", norm);
-            else
-                err.n("initially no normalizer was specified");
+        if (annex && annex->fresh) {
+            annex->normalizer = normalizer();
+            annex->pi         = pi;
+        } else if (annex) {
+            if (pi ^ *annex->pi)
+                s.error().e(dbg.loc(),
+                            "all declarations of annex `{}` must be function types if one of them is (they share one "
+                            "annex tag - via mod-nesting or a `tag.(...)` family - and must agree in shape)",
+                            dbg.sym());
+
+            if (annex->normalizer.sym() != normalizer().sym()) {
+                auto l    = normalizer().loc() ? normalizer().loc() : loc().anew_end();
+                auto& err = s.error().e(l, "normalizer mismatch for axm `{}`", dbg);
+                if (auto norm = annex->normalizer)
+                    err.n(norm.loc(), "previous normalizer `{}` declared here", norm);
+                else
+                    err.n("initially no normalizer was specified");
+            }
+        }
+
+        s.bind(dbg, name.get(), vis());
+        for (auto alias : name->aliases()) {
+            s.bind(alias, name.get(), vis());
+            if (annex) add_alias(annex, name->sub_, dbg.sym(), alias.sym());
         }
     }
 
-    s.bind(dbg(), this);
-}
-
-void AxmDecl::Sibling::bind(Scopes& s) const {
-    annex_ = s.ast().name2annex(s, dbg(), &sub_);
-    s.bind(dbg(), this);
+    if (members_) {
+        s.pop_mod();
+        s.pop();
+        // The family is reachable as a module whatever the visibility of its axioms.
+        s.bind(mod_, this, Vis::Pub);
+    }
 }
 
 void AliasDecl::bind(Scopes& s) const {
@@ -423,13 +452,7 @@ void AliasDecl::bind(Scopes& s) const {
         return;
     }
 
-    // An ungrouped target (the common case) never allocated its own sub-group; seed one now,
-    // named after the target itself, so this alias has a slot to share.
-    if (sub_ >= annex_->subs.size()) {
-        assert(sub_ == annex_->subs.size());
-        annex_->subs.emplace_back(fe::Vector<Sym>{target->dbg().sym()});
-    }
-    annex_->subs[sub_].emplace_back(dbg().sym());
+    add_alias(annex_, sub_, target->dbg().sym(), dbg().sym());
 }
 
 void LetDecl::bind(Scopes& s) const {
@@ -448,15 +471,25 @@ void LetDecl::bind(Scopes& s) const {
 }
 
 void RecDecl::bind(Scopes& s) const {
-    for (auto curr = this; curr; curr = curr->next())
-        curr->bind_decl(s);
-    for (auto curr = this; curr; curr = curr->next())
-        curr->bind_body(s);
+    bind_decl(s);
+    bind_body(s);
+}
+
+void MutualDecl::bind(Scopes& s) const {
+    for (auto decl : decls())
+        decl->bind_decl(s);
+    for (auto decl : decls())
+        decl->bind_body(s);
+}
+
+bool RecDecl::has_mut_body() const {
+    return body()->isa<PiExpr>() || InfixExpr::isa_op(Tag::T_arrow_r, body()) || body()->isa<SigmaExpr>()
+        || body()->isa<VariantExpr>();
 }
 
 void RecDecl::bind_decl(Scopes& s) const {
-    if (!body()->isa<PiExpr>() && !InfixExpr::isa_op(Tag::T_arrow_r, body()) && !body()->isa<SigmaExpr>()
-        && !body()->isa<VariantExpr>())
+    // A `nom` over any other body is merely not recursive.
+    if (!isa<NomDecl>() && !has_mut_body())
         s.error()
             .e(body()->loc(), "unsupported expression in a recursive declaration")
             .n("must be a sigma, a variant, or a function type; use `lam`/`con`/`fun` to declare a recursive function");

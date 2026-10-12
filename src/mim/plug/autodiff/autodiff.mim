@@ -117,10 +117,8 @@ axm eval: compile.Phase;
 /// The derivative of the axiom `plugin.tag.sub` is the annex `autodiff.diff.plugin_tag_sub`, i.e. the axiom's name
 /// with all `.`s replaced by `_`s;
 /// this is how mim::plug::autodiff::phase::Eval looks a derivative up.
-/// Being annexes, they are roots of the World and hence survive until mim::plug::autodiff::phase::Eval has consumed
-/// them.
-/// But - unlike externals - they are invisible to the backends and a `compile.unload "autodiff"` nukes them along
-/// with all the other annexes of this plugin.
+/// Being annexes, they live in the mim::Driver::library and are imported when mim::plug::autodiff::phase::Eval looks them up.
+/// But - unlike externals - they are invisible to the backends.
 ///
 ///
 /// #### autodiff.diff
@@ -130,11 +128,11 @@ axm eval: compile.Phase;
 /// - The derivative of `core.wrap.add`: `s ↦ (s, s)`
 /// - The derivative of `core.wrap.mul`: `s ↦ (s*b, s*a)`
 ///
-mod diff {
+mod diff
     anx fun core_icmp_xYgLE {s: Nat} (ab: «2; Idx s»)@tt: [Bool, Cn [Bool, Cn «2; Idx s»]] =
         return (core.icmp.sle ab, fn (_: Bool)@tt: «2; Idx s» = return ‹2; 0:(Idx s)›);
     anx fun core_wrap_add (m: Nat) {s: Nat} (ab: «2; Idx s»)@tt: [Idx s, Cn [Idx s, Cn «2; Idx s»]] =
         return (core.wrap.add m ab, fn (i: Idx s)@tt: «2; Idx s» = return ‹2; i›);
     anx fun core_wrap_mul (m: Nat) {s: Nat} (a b: Idx s) as ab@tt: [Idx s, Cn [Idx s, Cn «2; Idx s»]] =
         return (core.wrap.mul m ab, fn (i: Idx s)@tt: «2; Idx s» = return (core.wrap.mul m (i, b), core.wrap.mul m (i, a)));
-}
+end

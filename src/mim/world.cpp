@@ -124,6 +124,7 @@ const Def* World::Annexes::attach(flags_t flags, Sym sym, const Def* def) {
     if (driver().is_loaded(Annex::demangle(flags))) {
         fe::assert_emplace(flags2entry_, flags, Annexes::Entry{sym, def});
         fe::assert_emplace(sym2flags_, sym, flags);
+        def2flags_.emplace(def, flags);
         def->annex_ = true;
         return def;
     }
@@ -138,6 +139,27 @@ void World::Annexes::attach_alias(flags_t flags, Sym sym) {
 }
 
 /*
+ * Library
+ */
+
+const Def* World::annex(Sym sym) {
+    if (auto flags = fe::lookup(annexes().sym2flags(), sym)) return annex(*flags);
+    if (auto lib = driver().library())
+        if (auto flags = fe::lookup(lib->annexes().sym2flags(), sym)) return annex(*flags);
+    return nullptr;
+}
+
+const Def* World::annex_miss(flags_t flags) {
+    if (auto lib = driver().library(); lib && lib != this)
+        if (auto e = fe::lookup(lib->annexes().flags2entry(), flags)) {
+            log().d("import annex `{}`", e->sym);
+            return annexes().attach(flags, e->sym, import(e->def));
+        }
+
+    fe::throwf("no Axm with ID {}; is plugin `{}` loaded?", flags, Annex::demangle(flags));
+}
+
+/*
  * constructor & destructor
  */
 
@@ -149,21 +171,23 @@ World::World(Driver* driver, const State& state)
     : driver_(driver)
     , zonker_(*this)
     , state_(state)
+    , importer_(*this)
     , move_(driver) {
-    data_.univ        = insert<Univ>(*this);
-    data_.lit_univ_0  = lit_univ(0);
-    data_.lit_univ_1  = lit_univ(1);
-    data_.type_0      = type(lit_univ_0());
-    data_.type_1      = type(lit_univ_1());
-    data_.type_bot    = insert<Bot>(type());
-    data_.type_top    = insert<Top>(type());
-    data_.sigma       = unify<Sigma>(type(), Defs{})->as<Sigma>();
-    data_.tuple       = unify<Tuple>(sigma(), Defs{})->as<Tuple>();
-    data_.type_nat    = insert<mim::Nat>(*this);
-    data_.type_idx    = insert<mim::Idx>(pi(type_nat(), type()));
-    data_.top_nat     = insert<Top>(type_nat());
-    data_.lit_nat_0   = lit_nat(0);
-    data_.lit_nat_1   = lit_nat(1);
+    data_.univ       = insert<Univ>(*this);
+    data_.lit_univ_0 = lit_univ(0);
+    data_.lit_univ_1 = lit_univ(1);
+    data_.type_0     = type(lit_univ_0());
+    data_.type_1     = type(lit_univ_1());
+    data_.type_bot   = insert<Bot>(type());
+    data_.type_top   = insert<Top>(type());
+    data_.sigma      = unify<Sigma>(type(), Defs{})->as<Sigma>();
+    data_.tuple      = unify<Tuple>(sigma(), Defs{})->as<Tuple>();
+    data_.type_nat   = insert<mim::Nat>(*this);
+    data_.type_idx   = insert<mim::Idx>(pi(type_nat(), type()));
+    data_.top_nat    = insert<Top>(type_nat());
+    // A frozen World cannot create them on demand, but e.g. Def::num_tprojs needs them to compute an arity.
+    for (nat_t i = 0; i != Num_Lit_Nats; ++i)
+        data_.lit_nats[i] = lit(type_nat(), i);
     data_.lit_idx_1_0 = lit_idx(1, 0);
     data_.type_bool   = type_idx(2);
     data_.lit_bool[0] = lit_idx(2, 0_u64);
@@ -808,8 +832,13 @@ const Def* World::inj(const Def* type, const Def* value) {
 
     if (type->isa<Variant>())
         value->blame("injecting into variant type `{}` requires the index of a case", type).bail();
+    if (type->isa<Nom>()) return name(type, value);
     if (type->isa<Join>()) return unify<Inj>(type, value, flags_t(0));
-    return value;
+    if (auto v = Checker::assignable(type, value)) return v;
+    value->blame("value is not assignable to `{}`", type)
+        .n("`{}` is neither a union nor a nominal type, so `inj` into it is the identity", type)
+        .n("expected `{}`, got `{}`", type, type_of(value))
+        .bail();
 }
 
 const Def* World::inj(const Def* type, nat_t index, const Def* value) {
@@ -931,6 +960,29 @@ const Def* World::unwrap(const Def* op) {
     op = op->zonk();
     if (auto single = op->isa_type<Single>()) return single->op();
     op->blame("operand of a singleton elimination is of type `{}` but must be of singleton type", type_of(op)).bail();
+}
+
+const Nom* World::nom(flags_t key, const Def* type) {
+    type = type->zonk();
+    if (auto t = type->unfold_type()) return unify<Nom>(t, type, key);
+    type->blame("`Univ` cannot be wrapped in a nominal newtype").bail();
+}
+
+const Def* World::name(const Def* n, const Def* value) {
+    auto nom = n->zonk()->isa<Nom>();
+    value    = value->zonk();
+    if (!nom) value->blame("cannot inject into non-nominal type `{}`", n).bail();
+    if (auto v = Checker::assignable(nom->op(), value)) return unify<Name>(nom, v);
+    value->blame("value is not assignable to nominal type `{}`", nom)
+        .n("expected `{}`, got `{}`", nom->op(), type_of(value))
+        .bail();
+}
+
+const Def* World::struc(const Def* value) {
+    value = value->zonk();
+    if (auto name = value->isa<Name>()) return name->op();
+    if (auto nom = value->isa_type<Nom>()) return unify<Struc>(nom->op(), value);
+    value->blame("operand of a nominal elimination is of type `{}` but must be of nominal type", type_of(value)).bail();
 }
 
 Sym World::append_suffix(Sym symbol, std::string suffix) {

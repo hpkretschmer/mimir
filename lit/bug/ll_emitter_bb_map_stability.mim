@@ -1,5 +1,5 @@
 // RUN: (! %mim -p ll %s 2>&1) | %FileCheck %s
-// CHECK: error: ll backend: cannot convert the type of a basic block
+// CHECK: error: ll backend: `main` jumps to `{{.*}}`, which is not a basic block of `main`
 
 plugin core;
 use core.ops.u.w;

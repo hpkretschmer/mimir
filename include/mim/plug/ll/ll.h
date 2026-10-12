@@ -6,7 +6,6 @@
 #include <format>
 #include <fstream>
 #include <iterator>
-#include <map>
 #include <optional>
 #include <ostream>
 #include <set>
@@ -245,7 +244,12 @@ protected:
 
     /// Registers @p arg as an incoming phi value for @p phi in @p callee, coming from predecessor @p pred.
     void emit_phi(Lam* callee, const Def* phi, std::string arg, Lam* pred) {
-        lam2bb_[callee].phis[phi].emplace_back(std::move(arg), id(pred, true));
+        // Inserting here would invalidate the `BB&` our caller holds.
+        auto i = lam2bb_.find(callee);
+        if (i == lam2bb_.end())
+            callee->blame(MIM_LL_BE "`{}` jumps to `{}`, which is not a basic block of `{}`", pred, callee, root())
+                .bail();
+        i->second.phis[phi].emplace_back(std::move(arg), id(pred, true));
         locals_[phi] = id(phi);
     }
 
@@ -277,7 +281,7 @@ protected:
     DefMap<std::string> locals_;
     DefMap<std::string> globals_;
     DefMap<std::string> types_;
-    std::map<Lam*, BB> lam2bb_;
+    LamMap<BB> lam2bb_;
 
     std::set<std::string> decls_;
     std::ostringstream type_decls_;
@@ -483,7 +487,7 @@ inline void Emitter::visit(const Nest& nest) {
 
     finalize();
     locals_.clear();
-    assert_unused(lam2bb_.size() == old_size && "unexpected basic block insertion");
+    assert_unused(lam2bb_.size() == old_size && "really make sure we didn't trigger a rehash");
     // A BB never crosses a function boundary: Nest::contains is `def->has_free_vars_in(vars())`,
     // so a *closed* Lam is never a member of another Lam's Nest - and it cannot belong to two Nests either,
     // since a Lam free in the vars of two closed Lams would make the outer one open.

@@ -1,0 +1,13 @@
+// RUN: %mim %s --no-opt -o - | %FileCheck %s
+// CHECK: (0I32, 1I32, 2I32)
+plugin core;
+plugin tuple;
+
+lam buildarr {i: Nat} (n: Nat) (arr: «i; I32»)@(core.ncmp.l (i, n)): «n; I32» =
+    core.select (
+        core.ncmp.e (i, n),
+        core.bitcast «n; I32» arr,
+        buildarr n (tuple.cat (arr, core.bitcast I32 i))
+    );
+
+extern lam f (): «3; I32» = buildarr 3 ();

@@ -201,10 +201,9 @@ public:
     /// compression: the chain is what the lattice means, and its links keep changing between rounds - see
     /// Analysis::lattice_force.
     const Def* repr(const Def* def) const {
-        auto a = follow(def);
-        if (!a) return def; // ⊥ or ⊤
-        auto b = follow(a);
-        return b ? repr_(a, b) : a;
+        assert(!is_cyclic(def) && "lattice chain must not loop");
+        for (auto next = follow(def); next != def; def = next, next = follow(def)) {}
+        return def;
     }
 
     /// @returns whether @p def is pinned to ⊤ (`def ↦ def`).
@@ -332,15 +331,13 @@ protected:
     ///@}
 
 private:
-    /// The next def on @p def's chain, or `nullptr` if @p def ends it (⊥ or ⊤).
+    /// The next def on @p def's chain, or @p def itself if it ends it (⊥ or ⊤).
     const Def* follow(const Def* def) const {
         auto i = lattice_.find(def);
-        return i == lattice_.end() || i->second == def ? nullptr : i->second;
+        return i == lattice_.end() ? def : i->second;
     }
 
-    /// The tail of repr() past its first two links: chases @p slow and @p fast until the chain ends or they
-    /// meet in a cycle, whose minimum-gid member is its (entry-independent) representative.
-    const Def* repr_(const Def* slow, const Def* fast) const;
+    bool is_cyclic(const Def* def) const;
 
     /// Walks all enqueued mutables' dependencies - in BFS order - under each mutable's curr_mut() scope.
     void drain();

@@ -98,20 +98,10 @@ const Def* Analysis::lookup(const Def* def) {
     return world().annexes().opaque(def) ? def : nullptr;
 }
 
-const Def* Analysis::repr_(const Def* slow, const Def* fast) const {
-    while (slow != fast) {
-        auto next = follow(fast);
-        if (!next) return fast;
-        fast = follow(next);
-        if (!fast) return next;
-        slow = follow(slow);
-        assert(slow && "slow lags fast, so fast already traversed slow's successor");
-    }
-
-    auto res = slow;
-    for (auto def = follow(slow); def != slow; def = follow(def))
-        if (def->gid() < res->gid()) res = def;
-    return res;
+bool Analysis::is_cyclic(const Def* def) const {
+    auto slow = follow(def), fast = follow(slow);
+    for (; slow != fast; slow = follow(slow), fast = follow(follow(fast))) {}
+    return follow(fast) != fast;
 }
 
 const Def* Analysis::rewrite(const Def* def) {

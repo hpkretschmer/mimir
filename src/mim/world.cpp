@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include <fe/container.h>
+#include <fe/restore.h>
 #include <fe/worklist.h>
 
 #include "mim/check.h"
@@ -300,17 +301,22 @@ const Def* World::umax(Defs ops_) {
     return sort == UMax::Univ ? umax : type(umax);
 }
 
-// TODO more thorough & consistent checks for singleton types
+const Def* World::inhabitant(const Def* type) {
+    if (auto s = Idx::isa(type)) {
+        if (auto l = Lit::isa(s); l && l == 1) return lit_idx_1_0();
+    } else if (auto s = type->isa<Sigma>(); s && s->num_ops() == 0) {
+        return tuple(s, {});
+    } else if (auto single = type->isa<Single>()) {
+        return wrap(single->op());
+    }
+    return nullptr;
+}
 
 const Def* World::var(Def* mut) {
     if (auto var = mut->var_) return var;
 
-    if (auto var_type = mut->var_type()) { // could be nullptr, if frozen
-        if (auto s = Idx::isa(var_type)) {
-            if (auto l = Lit::isa(s); l && l == 1) return lit_idx_1_0();
-        } else if (auto s = var_type->isa<Sigma>(); s && s->num_ops() == 0)
-            return tuple(s, {});
-    }
+    if (auto var_type = mut->var_type()) // could be nullptr, if frozen
+        if (auto inhabitant = this->inhabitant(var_type)) return inhabitant;
 
     return mut->var_ = unify<Var>(mut);
 }
@@ -371,7 +377,14 @@ const Def* World::app(const Def* callee, const Def* arg) {
                 auto i    = move_.substs.find({var, arg});
                 auto body = i != move_.substs.end() ? i->second->ops()[1] : nullptr;
                 if (body != Filling) {
-                    if (!body) log().d("partially evaluate {} ({})", lam, arg);
+                    if (body) return reduce(var, arg, 1);
+                    if (data_.pe_depth == flags().pe_fuel)
+                        callee->blame("partial evaluation of `{}` ran out of fuel", lam)
+                            .n("nested more than {} partial evaluations; raise the limit with `--pe-fuel`",
+                               flags().pe_fuel)
+                            .bail();
+                    log().d("partially evaluate `{} ({})`", lam, arg);
+                    auto _ = fe::Restore(data_.pe_depth, data_.pe_depth + 1);
                     return reduce(var, arg, 1);
                 }
             }

@@ -65,12 +65,16 @@ Def::Def(World* world, Node node, const Def* type, Defs ops, flags_t flags)
     auto muts = Muts();
     World* w  = nullptr;
 
-    auto collect = [&](const Def* d) {
-        dep |= d->dep_;
+    auto collect = [&](const Def* d, bool with_vars = true, bool with_muts = true) {
+        if (!with_vars && !with_muts) return;
+        auto mask = ~0u;
+        if (!with_vars) mask &= ~fe::to_underlying(Dep::Var);
+        if (!with_muts) mask &= ~fe::to_underlying(Dep::Mut);
+        dep |= d->dep_ & mask;
         // A Def without Dep::Var and Dep::Mut has neither local Vars nor local Muts.
         if (!(d->dep_ & (fe::to_underlying(Dep::Var) | fe::to_underlying(Dep::Mut)))) return;
-        auto dvars = d->local_vars();
-        auto dmuts = d->local_muts();
+        auto dvars = with_vars ? d->local_vars() : Vars();
+        auto dmuts = with_muts ? d->local_muts() : Muts();
         if ((vars && dvars) || (muts && dmuts)) {
             if (!w) w = &d->world();
             vars = w->vars().merge(vars, dvars);
@@ -90,7 +94,10 @@ Def::Def(World* world, Node node, const Def* type, Defs ops, flags_t flags)
         ptr[i]  = op;
         gids    = gids << 32 | op->gid();
         if (i & 1) h = fe::hash_combine(h, gids), gids = 0;
-        if (node != Node::Proxy) collect(op);
+        if (node == Node::Proxy)
+            collect(op, flags & Proxy::Vars_Bit, flags & Proxy::Muts_Bit);
+        else
+            collect(op);
     }
     if (gids) h = fe::hash_combine(h, gids); // gid 0 is never handed out, so this odd tail cannot alias a pair
 
@@ -396,6 +403,13 @@ bool Def::nests(const Def* def) {
     return false;
 }
 
+bool Def::in_scope(Def* mut) const {
+    return std::ranges::all_of(free_vars(), [mut](const Var* fv) {
+        auto binder = fv->binder();
+        return binder == mut || binder->nests(mut);
+    });
+}
+
 /*
  * Def - misc
  */
@@ -624,8 +638,14 @@ void Def::transfer_external(Def* to) {
 
 std::string Def::unique_name() const { return sym().str() + "_"s + std::to_string(gid()); }
 
+static bool is_seq_arity(const Def* def) {
+    if (def->isa<Seq>()) return true;
+    if (auto t = def->type(); t && !t->isa<Type>()) return is_seq_arity(t);
+    return false;
+}
+
 nat_t Def::num_tprojs() const {
-    if (auto a = Lit::isa(arity()); a && *a < world().flags().scalarize_threshold) return *a;
+    if (auto a = Lit::isa(arity()); a && (*a < world().flags().scalarize_threshold || !is_seq_arity(this))) return *a;
     return 1;
 }
 

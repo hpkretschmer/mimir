@@ -325,7 +325,12 @@ public:
             return type(lit_univ(level));
     }
     const Def* var(Def* mut);
-    const Proxy* proxy(const Def* type, Defs ops, flags_t tag) { return unify<Proxy>(type, tag, ops); }
+    const Def*
+    inhabitant(const Def* type); ///< The sole inhabitant of @p type, if it is a singleton, `nullptr` otherwise.
+    /// @see Proxy::tracks_vars, Proxy::tracks_muts
+    const Proxy* proxy(const Def* type, Defs ops, u32 tag, bool vars = false, bool muts = false) {
+        return unify<Proxy>(type, Proxy::mk_flags(tag, vars, muts), ops);
+    }
 
     Hole* mut_hole(const Def* type) { return insert<Hole>(type); }
     Hole* mut_hole_univ() { return mut_hole(univ()); }
@@ -949,6 +954,7 @@ private:
         std::array<const Lit*, 2> lit_bool;
         std::array<const Lit*, Num_Lit_Nats> lit_nats = {}; ///< @see World::lit_nat
         u32 curr_run                                  = 0;
+        u32 pe_depth                                  = 0;
     } data_;
 
     friend void swap(World& w1, World& w2) noexcept {

@@ -651,6 +651,7 @@ void RuleDecl::bind(Scopes& s) const {
     guard()->bind(s);
     s.pop();
     s.bind(dbg(), this);
+    if (is_norm()) s.ast().add_norm(loc2plugin(s.ast(), loc()), this);
 }
 
 } // namespace mim::ast

@@ -61,16 +61,198 @@ std::string escape(Sym sym, std::span<const std::string_view> keywords) {
 
 std::string_view kind(const AnnexInfo& annex) { return annex.fields ? "field" : "ctor"; }
 
+/// Translates the `norm` rules sharing a name into the C++ normalizer of that name.
+class NormGen {
+public:
+    /// @p plugins receives every plugin whose annexes the generated code refers to.
+    NormGen(AST& ast, std::set<std::string>& plugins)
+        : ast_(ast)
+        , plugins_(plugins) {}
+
+    /// Each rule becomes its own function, so a failed match can just `return nullptr` and the next rule is tried.
+    void emit(std::ostream& os, Sym name, const std::vector<const RuleDecl*>& rules) {
+        auto norm = escape(name, Cpp_Keywords);
+        for (size_t i = 0, e = rules.size(); i != e; ++i)
+            emit(os, std::format("{}_{}", norm, i), rules[i]);
+
+        std::println(os, "inline const Def* {}(const Def* type, const Def* callee, const Def* arg) {{", norm);
+        for (size_t i = 0, e = rules.size(); i != e; ++i)
+            std::println(os, "    if (auto res = {}_{}(type, callee, arg)) return res;", norm, i);
+        std::println(os, "    return nullptr;\n}}\n");
+    }
+
+private:
+    void emit(std::ostream& os, const std::string& fn, const RuleDecl* rule) {
+        metas_.clear();
+        bound_.clear();
+        body_.str("");
+        num_tmps_ = 0;
+        collect(rule->var());
+
+        // TODO a non-App lhs, such as a nullary axiom, has no (callee, arg) to match against
+        if (auto app = rule->lhs()->isa<AppExpr>()) {
+            match(app->callee(), "callee");
+            match(app->arg(), "arg");
+        } else {
+            ast_.error().e(rule->lhs()->loc(), "the left-hand side of a `norm` rule must be an application");
+        }
+
+        if (auto prim = rule->guard()->isa<PrimaryExpr>(); !prim || prim->tag() != Tok::Tag::K_tt)
+            line("if ({} != w.lit_tt()) return nullptr;", build(rule->guard()));
+        // TODO guard against an rhs that rebuilds the lhs, which recurses into this very normalizer forever
+        line("return {};", build(rule->rhs()));
+
+        std::println(os,
+                     "inline const Def* {}(const Def* type, [[maybe_unused]] const Def* callee, "
+                     "[[maybe_unused]] const Def* arg) {{",
+                     fn);
+        std::println(os, "    [[maybe_unused]] auto& w = type->world();");
+        std::print(os, "{}", body_.str());
+        std::println(os, "}}\n");
+    }
+
+    void collect(const Ptrn* ptrn) {
+        if (auto tuple = ptrn->isa<TuplePtrn>()) {
+            for (const auto& p : tuple->ptrns())
+                collect(p.get());
+        } else if (ptrn->isa<AliasPtrn>()) {
+            // TODO bind the alias to the whole matched tuple
+            ast_.error().e(ptrn->loc(), "`as` patterns are not yet supported in a `norm` rule");
+        } else if (auto dbg = ptrn->dbg(); !dbg.is_anon()) {
+            metas_[ptrn] = std::string(dbg.sym().view()) + "_";
+        }
+    }
+
+    void match(const Expr* expr, const std::string& def) {
+        if (auto path = expr->isa<PathExpr>()) {
+            if (auto i = metas_.find(path->decl()); i != metas_.end()) {
+                // TODO check that def inhabits the meta variable's type
+                if (bound_.emplace(path->decl()).second)
+                    line("auto {} = {};", i->second, def);
+                else
+                    line("if ({} != {}) return nullptr;", def, i->second);
+                return;
+            }
+        } else if (expr->isa<HoleExpr>()) {
+            return;
+        } else if (auto app = expr->isa<AppExpr>()) {
+            // TODO an implicit argument is an App in the IR but invisible in the AST, so both shapes diverge
+            auto tmp = std::format("app{}", num_tmps_++);
+            line("auto {} = {}->isa<App>();", tmp, def);
+            line("if (!{}) return nullptr;", tmp);
+            match(app->callee(), tmp + "->callee()");
+            match(app->arg(), tmp + "->arg()");
+            return;
+        } else if (auto tuple = expr->isa<TupleExpr>()) {
+            auto tmp = std::format("tup{}", num_tmps_++);
+            auto n   = tuple->num_elems();
+            line("auto {} = {};", tmp, def);
+            line("if (Lit::isa({}->arity()) != {}_n) return nullptr;", tmp, n);
+            for (size_t i = 0; i != n; ++i)
+                match(tuple->elem(i), std::format("{}->proj({}, {})", tmp, n, i));
+            return;
+        }
+
+        // TODO match up to normalization: e.g. a literal arg may stem from a folded application in the pattern
+        line("if ({} != {}) return nullptr;", def, build(expr));
+    }
+
+    std::string build(const Expr* expr) {
+        if (auto path = expr->isa<PathExpr>()) {
+            auto decl = path->decl();
+            if (auto i = metas_.find(decl); i != metas_.end()) {
+                if (!bound_.contains(decl))
+                    ast_.error().e(expr->loc(), "meta variable `{}` is not bound by the left-hand side", path->dbg());
+                return i->second;
+            }
+            if (auto [annex, sub] = decl->annex_sub(); annex) return build(*annex, sub);
+            // TODO other declarations of the plugin, e.g. a `let` or a `lam`
+        } else if (auto lit = expr->isa<LitExpr>(); lit && !lit->type()) {
+            // TODO typed, signed, float, char, and string literals as well as ⊥ and ⊤
+            if (lit->tag() == Tok::Tag::L_u) return std::format("w.lit_nat({}_n)", lit->tok().lit_u());
+            if (lit->tag() == Tok::Tag::L_i) {
+                auto [size, val] = lit->tok().lit_i();
+                return std::format("w.lit_idx({}_n, {}_n)", size, val);
+            }
+        } else if (auto prim = expr->isa<PrimaryExpr>()) {
+            // TODO the remaining primaries
+            switch (prim->tag()) {
+                case Tok::Tag::K_tt: return "w.lit_tt()";
+                case Tok::Tag::K_ff: return "w.lit_ff()";
+                case Tok::Tag::K_Nat: return "w.type_nat()";
+                case Tok::Tag::K_Bool: return "w.type_bool()";
+                default: break;
+            }
+        } else if (auto app = expr->isa<AppExpr>()) {
+            return std::format("w.implicit_app({}, {})", build(app->callee()), build(app->arg()));
+        } else if (auto tuple = expr->isa<TupleExpr>()) {
+            auto elems = std::string();
+            for (const auto& elem : tuple->elems())
+                elems += (elems.empty() ? "" : ", ") + build(elem.get());
+            return std::format("w.tuple({{{}}})", elems);
+        }
+
+        // TODO infix operators, extracts, inserts, `let`, lambdas, sigmas, ...
+        ast_.error().e(expr->loc(), "expression not yet supported in a `norm` rule");
+        return "nullptr";
+    }
+
+    std::string build(const AnnexInfo& annex, sub_t sub) {
+        plugins_.emplace(annex.sym.plugin.str());
+        auto tag = std::format("plug::{}::{}", annex.sym.plugin, escape(annex.sym.tag, Cpp_Keywords));
+        if (annex.subs.empty()) return std::format("w.annex<{}>()", tag);
+        return std::format("w.annex({}::{})", tag, escape(annex.subs[sub].front(), Cpp_Keywords));
+    }
+
+    template<class... Args>
+    void line(std::format_string<Args...> fmt, Args&&... args) {
+        std::println(body_, "    {}", std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    AST& ast_;
+    std::set<std::string>& plugins_;
+    ankerl::unordered_dense::map<const Decl*, std::string> metas_;
+    ankerl::unordered_dense::set<const Decl*> bound_;
+    std::ostringstream body_;
+    size_t num_tmps_ = 0;
+};
+
 } // namespace
 
 void AST::bootstrap(Sym plugin, std::ostream& h) {
+    auto targets = std::set<std::string>();
+
+    // Generate the rule-based normalizers first, so an unsupported rule fails before anything is written.
+    auto rule_norms = std::vector<std::pair<Sym, std::vector<const RuleDecl*>>>();
+    for (auto rule : plugin2norms(plugin)) {
+        auto name = rule->dbg().sym();
+        auto i    = std::ranges::find(rule_norms, name, [](const auto& p) { return p.first; });
+        if (i == rule_norms.end()) i = rule_norms.insert(i, {name, {}});
+        i->second.emplace_back(rule);
+    }
+    auto norms_os = std::ostringstream();
+    auto norm_gen = NormGen(*this, targets);
+    for (const auto& [name, rules] : rule_norms)
+        norm_gen.emit(norms_os, name, rules);
+    auto is_rule_norm = [&](Dbg norm) {
+        return std::ranges::contains(rule_norms, norm.sym(), [](const auto& p) { return p.first; });
+    };
+
+    // TODO a family needs a `template<tag>` normalizer, generated from the rules whose lhs head is that sub-tag
+    for (const auto& [_, annex] : plugin2annexes(plugin))
+        if (annex.sym.plugin == plugin && !annex.subs.empty() && annex.normalizer && is_rule_norm(annex.normalizer))
+            error().e(annex.normalizer.loc(), "`norm` rules for an axiom family are not yet supported");
+    error().ack();
+    targets.erase(plugin.str());
+
     auto tab = fe::Tab::spaces();
     std::println(h, "{}#pragma once\n", tab);
     std::println(h, "{}#include <mim/axm.h>", tab);
-    std::println(h, "{}#include <mim/plugin.h>\n", tab);
+    std::println(h, "{}#include <mim/plugin.h>", tab);
+    if (!rule_norms.empty()) std::println(h, "{}#include <mim/world.h>", tab);
+    std::println(h, "");
 
     const auto& foreign = plugin2foreign_aliases(plugin);
-    auto targets        = std::set<std::string>();
     for (const auto& alias : foreign)
         targets.emplace(alias.annex->sym.plugin.str());
     for (const auto& target : targets)
@@ -136,7 +318,7 @@ void AST::bootstrap(Sym plugin, std::ostream& h) {
 
         std::println(outer_namespace.emplace_back(), "template<> constexpr size_t Annex::Num<plug::{}::{}> = {};", plugin, tag, annex.subs.size());
 
-        if (auto norm = annex.normalizer) {
+        if (auto norm = annex.normalizer; norm && !is_rule_norm(norm)) {
             if (auto& subs = annex.subs; !subs.empty()) {
                 std::println(h, "{}template<{}>\nconst Def* {}(const Def*, const Def*, const Def*);\n", tab, tag,
                            norm);
@@ -197,6 +379,13 @@ void AST::bootstrap(Sym plugin, std::ostream& h) {
     }
 
     std::println(h, "{}\n#endif", tab);
+
+    // Only here are all Annex specializations, which the generated normalizers instantiate, complete.
+    if (!rule_norms.empty()) {
+        std::println(h, "\nnamespace mim::plug::{} {{\n", plugin);
+        std::print(h, "{}", norms_os.str());
+        std::println(h, "}} // namespace mim::plug::{}", plugin);
+    }
 }
 
 void AST::bootstrap_py(Sym plugin, std::ostream& h) {

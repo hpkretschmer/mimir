@@ -823,10 +823,11 @@ public:
         , dom_(dom)
         , codom_(codom) {}
 
-private:
-    Tok::Tag tag() const { return tag_; }
     const Dom* dom() const { return dom_.get(); }
     const Expr* codom() const { return codom_.get(); }
+
+private:
+    Tok::Tag tag() const { return tag_; }
 
     void bind(Scopes&) const override;
     void stream(fe::Tab&, std::ostream&) const override;
@@ -1090,14 +1091,16 @@ public:
         auto names() const { return vla<0>(); }
         Dbg dbg() const override { return names().front(); }
         auto aliases() const { return names().subspan(1); }
+        const AxmDecl* axm() const { return axm_; }
         bool is_anx() const override { return true; }
         std::pair<AnnexInfo*, sub_t> annex_sub() const override { return {annex_, sub_}; }
 
         void stream(fe::Tab&, std::ostream&) const override;
 
     private:
-        mutable AnnexInfo* annex_ = nullptr;
-        mutable sub_t sub_        = 0;
+        mutable AnnexInfo* annex_   = nullptr;
+        mutable sub_t sub_          = 0;
+        mutable const AxmDecl* axm_ = nullptr;
 
         friend class AxmDecl;
     };

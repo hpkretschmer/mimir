@@ -1,0 +1,26 @@
+// UNSUPPORTED: roundtrip
+// RUN: %mim %s --output-h - --bootstrap | %FileCheck %s
+
+axm fam.(a, b, c): {T: *} → T → T, normalize_fam;
+norm normalize_fam (T: *, x: T): fam.a x => x;
+norm normalize_fam (T: *, x: T): (fam.b @ T) x => fam.a x;
+
+// CHECK-LABEL: inline const Def* normalize_fam_0(
+// CHECK:       auto app0 = callee->isa<App>();
+// CHECK:       if (app0->callee() != w.annex(plug::normgen::fam::a)) return nullptr;
+// CHECK-NEXT:  {{\[\[maybe_unused\]\]}} auto x_ = arg;
+// CHECK-NEXT:  return x_;
+
+// CHECK-LABEL: inline const Def* normalize_fam_1(
+// CHECK:       if (app0->callee() != w.annex(plug::normgen::fam::b)) return nullptr;
+// CHECK-NEXT:  {{\[\[maybe_unused\]\]}} auto T_ = app0->arg();
+// CHECK-NEXT:  {{\[\[maybe_unused\]\]}} auto x_ = arg;
+// CHECK-NEXT:  return w.implicit_app(w.annex(plug::normgen::fam::a), x_);
+
+// CHECK-LABEL: template<plug::normgen::fam id>
+// CHECK-NEXT:  inline const Def* normalize_fam(
+// CHECK-NEXT:  if constexpr (id == plug::normgen::fam::a)
+// CHECK-NEXT:  if (auto res = normalize_fam_0(type, callee, arg)) return res;
+// CHECK-NEXT:  if constexpr (id == plug::normgen::fam::b)
+// CHECK-NEXT:  if (auto res = normalize_fam_1(type, callee, arg)) return res;
+// CHECK-NEXT:  return nullptr;

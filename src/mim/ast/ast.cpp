@@ -70,19 +70,31 @@ public:
         , plugins_(plugins) {}
 
     /// Each rule becomes its own function, so a failed match can just `return nullptr` and the next rule is tried.
-    void emit(std::ostream& os, Sym name, const std::vector<const RuleDecl*>& rules) {
-        auto norm = escape(name, Cpp_Keywords);
+    /// A @p family's normalizer is a template over its sub-tags that only tries the rules headed by that sub-tag.
+    void emit(std::ostream& os, Sym name, const std::vector<const RuleDecl*>& rules, const AnnexInfo* family) {
+        auto norm  = escape(name, Cpp_Keywords);
+        auto heads = std::vector<std::pair<const AnnexInfo*, sub_t>>();
         for (size_t i = 0, e = rules.size(); i != e; ++i)
-            emit(os, std::format("{}_{}", norm, i), rules[i]);
+            heads.emplace_back(emit(os, std::format("{}_{}", norm, i), rules[i]));
 
-        std::println(os, "inline const Def* {}(const Def* type, const Def* callee, const Def* arg) {{", norm);
-        for (size_t i = 0, e = rules.size(); i != e; ++i)
-            std::println(os, "    if (auto res = {}_{}(type, callee, arg)) return res;", norm, i);
+        if (family) std::println(os, "template<{} id>", tag_name(*family));
+        std::println(os,
+                     "inline const Def* {}([[maybe_unused]] const Def* type, [[maybe_unused]] const Def* callee, "
+                     "[[maybe_unused]] const Def* arg) {{",
+                     norm);
+        for (size_t i = 0, e = rules.size(); i != e; ++i) {
+            auto call = std::format("if (auto res = {}_{}(type, callee, arg)) return res;", norm, i);
+            if (auto [annex, sub] = heads[i]; family && annex == family)
+                std::println(os, "    if constexpr (id == {})\n        {}", sub_name(*family, sub), call);
+            else
+                std::println(os, "    {}", call);
+        }
         std::println(os, "    return nullptr;\n}}\n");
     }
 
 private:
-    void emit(std::ostream& os, const std::string& fn, const RuleDecl* rule) {
+    /// @returns the annex and sub-tag that head @p rule's lhs, or `{nullptr, 0}` if no axiom does.
+    std::pair<const AnnexInfo*, sub_t> emit(std::ostream& os, const std::string& fn, const RuleDecl* rule) {
         metas_.clear();
         bound_.clear();
         body_.str("");
@@ -90,11 +102,13 @@ private:
         collect(rule->var());
 
         // TODO a non-App lhs, such as a nullary axiom, has no (callee, arg) to match against
-        if (auto app = rule->lhs()->isa<AppExpr>()) {
-            match(app->callee(), "callee");
-            match(app->arg(), "arg");
-        } else {
+        // TODO an Axm with a custom curry or trip counter normalizes at another spot than after its last argument
+        auto [head, args] = spine(rule->lhs());
+        if (args.empty()) {
             ast_.error().e(rule->lhs()->loc(), "the left-hand side of a `norm` rule must be an application");
+        } else {
+            match(head, std::span(args).first(args.size() - 1), "callee");
+            match(args.back(), "arg");
         }
 
         if (auto prim = rule->guard()->isa<PrimaryExpr>(); !prim || prim->tag() != Tok::Tag::K_tt)
@@ -109,6 +123,69 @@ private:
         std::println(os, "    [[maybe_unused]] auto& w = type->world();");
         std::print(os, "{}", body_.str());
         std::println(os, "}}\n");
+
+        auto path = head->isa<PathExpr>();
+        return path ? path->decl()->annex_sub() : std::pair<AnnexInfo*, sub_t>{nullptr, 0};
+    }
+
+    /// The head of the application @p expr and its arguments as the IR applies them; `nullptr` is an implicit one.
+    std::pair<const Expr*, std::vector<const Expr*>> spine(const Expr* expr) {
+        auto args = std::vector<std::pair<const Expr*, bool>>(); // (argument, is it passed explicitly via `@`?)
+        for (;;) {
+            expr = unparen(expr);
+            if (auto app = expr->isa<AppExpr>()) {
+                args.emplace_back(app->arg(), false);
+                expr = app->callee();
+            } else if (auto at = InfixExpr::isa_op(Tok::Tag::T_at, expr)) {
+                args.emplace_back(at->rhs(), true);
+                expr = at->lhs();
+            } else {
+                break;
+            }
+        }
+        std::ranges::reverse(args);
+
+        // Mirrors World::implicit_holes, which fills every implicit domain in front of an argument without `@`.
+        auto doms = implicit_doms(expr);
+        auto res  = std::vector<const Expr*>();
+        size_t d  = 0;
+        for (auto [arg, at] : args) {
+            if (!at)
+                for (; d < doms.size() && doms[d]; ++d)
+                    res.emplace_back(nullptr);
+            res.emplace_back(arg);
+            ++d;
+        }
+        return {expr, res};
+    }
+
+    /// `(e)` is a one-element TupleExpr, which World::tuple folds to `e`.
+    static const Expr* unparen(const Expr* expr) {
+        while (auto tuple = expr->isa<TupleExpr>()) {
+            if (tuple->num_elems() != 1) break;
+            expr = tuple->elem(0);
+        }
+        return expr;
+    }
+
+    /// Whether each curried domain of the axiom @p head names is implicit.
+    static std::vector<bool> implicit_doms(const Expr* head) {
+        auto doms = std::vector<bool>();
+        auto path = head->isa<PathExpr>();
+        auto name = path ? path->decl()->isa<AxmDecl::Name>() : nullptr;
+        // TODO a non-axiom head, and a domain whose implicitness hides behind an alias of a Pi
+        for (auto type = name ? name->axm()->type() : nullptr; type;) {
+            if (auto pi = type->isa<PiExpr>()) {
+                doms.emplace_back(pi->dom()->is_implicit());
+                type = pi->codom();
+            } else if (auto arrow = InfixExpr::isa_op(Tok::Tag::T_arrow_r, type)) {
+                doms.emplace_back(false);
+                type = arrow->rhs();
+            } else {
+                break;
+            }
+        }
+        return doms;
     }
 
     void collect(const Ptrn* ptrn) {
@@ -123,26 +200,33 @@ private:
         }
     }
 
+    void match(const Expr* head, std::span<const Expr* const> args, const std::string& def) {
+        if (args.empty()) return match(head, def);
+        auto tmp = std::format("app{}", num_tmps_++);
+        line("auto {} = {}->isa<App>();", tmp, def);
+        line("if (!{}) return nullptr;", tmp);
+        match(head, args.first(args.size() - 1), tmp + "->callee()");
+        match(args.back(), tmp + "->arg()");
+    }
+
+    /// A `nullptr` @p expr is an implicit argument and matches anything.
     void match(const Expr* expr, const std::string& def) {
+        if (!expr) return;
+        expr = unparen(expr);
         if (auto path = expr->isa<PathExpr>()) {
             if (auto i = metas_.find(path->decl()); i != metas_.end()) {
                 // TODO check that def inhabits the meta variable's type
                 if (bound_.emplace(path->decl()).second)
-                    line("auto {} = {};", i->second, def);
+                    line("[[maybe_unused]] auto {} = {};", i->second, def);
                 else
                     line("if ({} != {}) return nullptr;", def, i->second);
                 return;
             }
         } else if (expr->isa<HoleExpr>()) {
             return;
-        } else if (auto app = expr->isa<AppExpr>()) {
-            // TODO an implicit argument is an App in the IR but invisible in the AST, so both shapes diverge
-            auto tmp = std::format("app{}", num_tmps_++);
-            line("auto {} = {}->isa<App>();", tmp, def);
-            line("if (!{}) return nullptr;", tmp);
-            match(app->callee(), tmp + "->callee()");
-            match(app->arg(), tmp + "->arg()");
-            return;
+        } else if (expr->isa<AppExpr>() || InfixExpr::isa_op(Tok::Tag::T_at, expr)) {
+            auto [head, args] = spine(expr);
+            return match(head, args, def);
         } else if (auto tuple = expr->isa<TupleExpr>()) {
             auto tmp = std::format("tup{}", num_tmps_++);
             auto n   = tuple->num_elems();
@@ -158,6 +242,7 @@ private:
     }
 
     std::string build(const Expr* expr) {
+        expr = unparen(expr);
         if (auto path = expr->isa<PathExpr>()) {
             auto decl = path->decl();
             if (auto i = metas_.find(decl); i != metas_.end()) {
@@ -185,6 +270,8 @@ private:
             }
         } else if (auto app = expr->isa<AppExpr>()) {
             return std::format("w.implicit_app({}, {})", build(app->callee()), build(app->arg()));
+        } else if (auto at = InfixExpr::isa_op(Tok::Tag::T_at, expr)) {
+            return std::format("w.app({}, {})", build(at->lhs()), build(at->rhs()));
         } else if (auto tuple = expr->isa<TupleExpr>()) {
             auto elems = std::string();
             for (const auto& elem : tuple->elems())
@@ -198,10 +285,17 @@ private:
     }
 
     std::string build(const AnnexInfo& annex, sub_t sub) {
+        if (annex.subs.empty()) return std::format("w.annex<{}>()", tag_name(annex));
+        return std::format("w.annex({})", sub_name(annex, sub));
+    }
+
+    std::string tag_name(const AnnexInfo& annex) {
         plugins_.emplace(annex.sym.plugin.str());
-        auto tag = std::format("plug::{}::{}", annex.sym.plugin, escape(annex.sym.tag, Cpp_Keywords));
-        if (annex.subs.empty()) return std::format("w.annex<{}>()", tag);
-        return std::format("w.annex({}::{})", tag, escape(annex.subs[sub].front(), Cpp_Keywords));
+        return std::format("plug::{}::{}", annex.sym.plugin, escape(annex.sym.tag, Cpp_Keywords));
+    }
+
+    std::string sub_name(const AnnexInfo& annex, sub_t sub) {
+        return std::format("{}::{}", tag_name(annex), escape(annex.subs[sub].front(), Cpp_Keywords));
     }
 
     template<class... Args>
@@ -230,18 +324,19 @@ void AST::bootstrap(Sym plugin, std::ostream& h) {
         if (i == rule_norms.end()) i = rule_norms.insert(i, {name, {}});
         i->second.emplace_back(rule);
     }
+    // TODO a normalizer shared by several families would need one template per family
+    auto family = [&](Sym norm) -> const AnnexInfo* {
+        for (const auto& [_, annex] : plugin2annexes(plugin))
+            if (annex.sym.plugin == plugin && !annex.subs.empty() && annex.normalizer.sym() == norm) return &annex;
+        return nullptr;
+    };
     auto norms_os = std::ostringstream();
     auto norm_gen = NormGen(*this, targets);
     for (const auto& [name, rules] : rule_norms)
-        norm_gen.emit(norms_os, name, rules);
+        norm_gen.emit(norms_os, name, rules, family(name));
     auto is_rule_norm = [&](Dbg norm) {
         return std::ranges::contains(rule_norms, norm.sym(), [](const auto& p) { return p.first; });
     };
-
-    // TODO a family needs a `template<tag>` normalizer, generated from the rules whose lhs head is that sub-tag
-    for (const auto& [_, annex] : plugin2annexes(plugin))
-        if (annex.sym.plugin == plugin && !annex.subs.empty() && annex.normalizer && is_rule_norm(annex.normalizer))
-            error().e(annex.normalizer.loc(), "`norm` rules for an axiom family are not yet supported");
     error().ack();
     targets.erase(plugin.str());
 

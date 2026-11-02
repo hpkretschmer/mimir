@@ -422,6 +422,7 @@ void AxmDecl::bind(Scopes& s) const {
     for (auto name : names()) {
         auto dbg    = name->dbg();
         auto& annex = name->annex_ = s.ast().name2annex(s, dbg, &name->sub_);
+        name->axm_                 = this;
 
         if (annex && annex->fresh) {
             annex->normalizer = normalizer();
@@ -650,7 +651,10 @@ void RuleDecl::bind(Scopes& s) const {
     rhs()->bind(s);
     guard()->bind(s);
     s.pop();
-    s.bind(dbg(), this);
+    // All `norm` rules of one name together form the normalizer of that name.
+    auto prev = is_norm() ? s.find(dbg(), true) : nullptr;
+    auto rule = prev ? prev->isa<RuleDecl>() : nullptr;
+    s.bind(dbg(), this, rule && rule->is_norm());
     if (is_norm()) s.ast().add_norm(loc2plugin(s.ast(), loc()), this);
 }
 

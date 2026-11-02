@@ -2,6 +2,9 @@
 
 #include <set>
 
+#include "mim/check.h"
+#include "mim/rule.h"
+
 #include "mim/ast/parser.h"
 
 using namespace std::literals;
@@ -61,16 +64,256 @@ std::string escape(Sym sym, std::span<const std::string_view> keywords) {
 
 std::string_view kind(const AnnexInfo& annex) { return annex.fields ? "field" : "ctor"; }
 
+/// Translates the IR of the `norm` rules sharing a name into the C++ normalizer of that name.
+class NormGen {
+public:
+    /// @p plugins receives every plugin whose annexes the generated code refers to.
+    NormGen(AST& ast, std::set<std::string>& plugins)
+        : ast_(ast)
+        , plugins_(plugins) {}
+
+    /// Each rule becomes its own function, so a failed match can just `return nullptr` and the next rule is tried.
+    /// A @p family's normalizer is a template over its sub-tags that only tries the rules headed by that sub-tag.
+    void emit(std::ostream& os, Sym name, const std::vector<const RuleDecl*>& rules, const AnnexInfo* family) {
+        auto norm  = escape(name, Cpp_Keywords);
+        auto heads = std::vector<std::pair<const AnnexInfo*, sub_t>>();
+        for (size_t i = 0, e = rules.size(); i != e; ++i)
+            heads.emplace_back(emit(os, std::format("{}_{}", norm, i), rules[i]));
+
+        if (family) std::println(os, "template<{} id>", tag_name(*family));
+        std::println(os,
+                     "inline const Def* {}([[maybe_unused]] const Def* type, [[maybe_unused]] const Def* callee, "
+                     "[[maybe_unused]] const Def* arg) {{",
+                     norm);
+        for (size_t i = 0, e = rules.size(); i != e; ++i) {
+            auto call = std::format("if (auto res = {}_{}(type, callee, arg)) return res;", norm, i);
+            if (auto [annex, sub] = heads[i]; family && annex == family)
+                std::println(os, "    if constexpr (id == {})\n        {}", sub_name(*family, sub), call);
+            else
+                std::println(os, "    {}", call);
+        }
+        std::println(os, "    return nullptr;\n}}\n");
+    }
+
+private:
+    /// @returns the annex and sub-tag that head the lhs of @p decl, or `{nullptr, 0}` if no axiom does.
+    std::pair<const AnnexInfo*, sub_t> emit(std::ostream& os, const std::string& fn, const RuleDecl* decl) {
+        metas_.clear();
+        names_.clear();
+        bound_.clear();
+        body_.str("");
+        num_tmps_ = 0;
+
+        auto rule = decl->def()->as<Rule>();
+        var_      = rule->has_var();
+        auto lhs  = rule->lhs()->zonk();
+        auto app  = lhs->isa<App>();
+
+        // TODO a non-App lhs, such as a nullary axiom, has no (callee, arg) to match against
+        // TODO an Axm with a custom curry or trip counter normalizes at another spot than after its last argument
+        if (!app) {
+            ast_.error().e(decl->lhs()->loc(), "the left-hand side of a `norm` rule must be an application");
+            return {nullptr, 0};
+        }
+
+        match(app->callee(), "callee");
+        match(app->arg(), "arg");
+        if (auto guard = rule->guard()->zonk(); guard != guard->world().lit_tt())
+            line("if ({} != w.lit_tt()) return nullptr;", build(guard));
+        // TODO guard against an rhs that rebuilds the lhs, which recurses into this very normalizer forever
+        line("return {};", build(rule->rhs()->zonk()));
+
+        std::println(os,
+                     "inline const Def* {}(const Def* type, [[maybe_unused]] const Def* callee, "
+                     "[[maybe_unused]] const Def* arg) {{",
+                     fn);
+        std::println(os, "    [[maybe_unused]] auto& w = type->world();");
+        std::print(os, "{}", body_.str());
+        std::println(os, "}}\n");
+
+        auto head = lhs;
+        while (auto a = head->isa<App>())
+            head = a->callee();
+        if (auto axm = head->isa<Axm>()) return annex(axm);
+        return {nullptr, 0};
+    }
+
+    /// The rule's Var or a projection of it.
+    bool is_meta(const Def* def) const {
+        if (!var_) return false;
+        if (def == var_) return true;
+        if (auto extract = def->isa<Extract>(); extract && extract->index()->isa<Lit>())
+            return is_meta(extract->tuple());
+        return false;
+    }
+
+    const std::string& meta_name(const Def* def) {
+        if (auto i = metas_.find(def); i != metas_.end()) return i->second;
+        auto name = std::string(def->sym().view());
+        std::ranges::replace_if(name, [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
+        if (name.empty() || std::isdigit(static_cast<unsigned char>(name.front()))) name = "m" + name;
+        name += "_";
+        for (auto base = name; !names_.emplace(name).second;)
+            name = std::format("{}{}_", base, names_.size());
+        return metas_[def] = name;
+    }
+
+    void match(const Def* pat, const std::string& def) {
+        if (is_meta(pat)) {
+            // TODO check that def inhabits the meta variable's type
+            if (bound_.emplace(pat).second)
+                line("[[maybe_unused]] auto {} = {};", meta_name(pat), def);
+            else
+                line("if ({} != {}) return nullptr;", def, meta_name(pat));
+            return;
+        }
+
+        // An implicit argument that nothing in the lhs determines.
+        if (pat->isa<Hole>()) return;
+
+        // TODO match up to normalization: e.g. a literal arg may stem from a folded application in the pattern
+        if (!var_ || !pat->has_free_var(var_)) {
+            line("if ({} != {}) return nullptr;", def, build(pat));
+            return;
+        }
+
+        if (pat->isa_mut()) {
+            // TODO mutables in a pattern, such as a lambda over a meta variable
+            ast_.error().e(pat->loc(), "mutable `{}` not yet supported in the left-hand side of a `norm` rule", pat);
+            return;
+        }
+
+        auto tmp = std::format("d{}", num_tmps_++);
+        line("auto {} = {};", tmp, def);
+        line("if ({}->node() != Node::{} || {}->num_ops() != {}) return nullptr;", tmp, pat->node_name(), tmp,
+             pat->num_ops());
+        for (size_t i = 0, e = pat->num_ops(); i != e; ++i)
+            match(pat->op(i), std::format("{}->op({})", tmp, i));
+    }
+
+    std::string build(const Def* def) {
+        if (is_meta(def)) {
+            if (!bound_.contains(def))
+                ast_.error().e(def->loc(), "meta variable `{}` is not bound by the left-hand side", def);
+            return meta_name(def);
+        }
+        if (auto axm = def->isa<Axm>()) {
+            auto [annex, sub] = this->annex(axm);
+            if (annex)
+                return annex->subs.empty() ? std::format("w.annex<{}>()", tag_name(*annex))
+                                           : std::format("w.annex({})", sub_name(*annex, sub));
+        } else if (def->isa_mut()) {
+            // TODO mutables, such as lambdas or mutable annexes
+        } else if (def->isa<Nat>()) {
+            return "w.type_nat()";
+        } else if (def->isa<Idx>()) {
+            return "w.type_idx()";
+        } else if (auto lit = def->isa<Lit>()) {
+            auto val = lit->get();
+            if (lit->type()->isa<Nat>()) return std::format("w.lit_nat({}_n)", val);
+            if (auto size = Idx::isa_lit(lit->type())) return std::format("w.lit_idx({}_n, {}_n)", *size, val);
+            return std::format("w.lit({}, {}_n)", build(lit->type()), val);
+        } else if (auto app = def->isa<App>()) {
+            return std::format("w.app({}, {})", build(app->callee()), build(app->arg()));
+        } else if (auto tuple = def->isa<Tuple>()) {
+            // TODO a Tuple whose type is not the Sigma of its elements' types
+            return std::format("w.tuple({{{}}})", build(tuple->ops()));
+        } else if (auto sigma = def->isa<Sigma>()) {
+            return std::format("w.sigma({{{}}})", build(sigma->ops()));
+        } else if (auto extract = def->isa<Extract>()) {
+            return std::format("w.extract({}, {})", build(extract->tuple()), build(extract->index()));
+        } else if (auto bot = def->isa<Bot>()) {
+            return std::format("w.bot({})", build(bot->type()));
+        } else if (auto top = def->isa<Top>()) {
+            return std::format("w.top({})", build(top->type()));
+        }
+
+        // TODO the remaining nodes: Pi, Arr, Pack, Insert, Type, Inj, Match, ...
+        ast_.error().e(def->loc(), "`{}` ({}) not yet supported in a `norm` rule", def, def->node_name());
+        return "nullptr";
+    }
+
+    std::string build(Defs defs) {
+        auto res = std::string();
+        for (auto def : defs)
+            res += (res.empty() ? "" : ", ") + build(def);
+        return res;
+    }
+
+    /// The AnnexInfo that declared @p axm and its sub-tag.
+    std::pair<const AnnexInfo*, sub_t> annex(const Axm* axm) {
+        auto plugin = ast_.sym(Annex::demangle(axm->plugin()));
+        for (const auto& [_, annex] : ast_.plugin2annexes(plugin))
+            if (annex.id.tag == axm->tag()) return {&annex, axm->sub()};
+        return {nullptr, 0};
+    }
+
+    std::string tag_name(const AnnexInfo& annex) {
+        plugins_.emplace(annex.sym.plugin.str());
+        return std::format("plug::{}::{}", annex.sym.plugin, escape(annex.sym.tag, Cpp_Keywords));
+    }
+
+    std::string sub_name(const AnnexInfo& annex, sub_t sub) {
+        return std::format("{}::{}", tag_name(annex), escape(annex.subs[sub].front(), Cpp_Keywords));
+    }
+
+    template<class... Args>
+    void line(std::format_string<Args...> fmt, Args&&... args) {
+        std::println(body_, "    {}", std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    AST& ast_;
+    std::set<std::string>& plugins_;
+    const Var* var_ = nullptr;
+    DefMap<std::string> metas_;
+    std::set<std::string> names_;
+    DefSet bound_;
+    std::ostringstream body_;
+    size_t num_tmps_ = 0;
+};
+
 } // namespace
 
 void AST::bootstrap(Sym plugin, std::ostream& h) {
+    auto targets = std::set<std::string>();
+
+    // Generate the rule-based normalizers first, so an unsupported rule fails before anything is written.
+    auto rule_norms = std::vector<std::pair<Sym, std::vector<const RuleDecl*>>>();
+    for (auto rule : plugin2norms(plugin)) {
+        auto name = rule->dbg().sym();
+        auto i    = std::ranges::find(rule_norms, name, [](const auto& p) { return p.first; });
+        if (i == rule_norms.end()) i = rule_norms.insert(i, {name, {}});
+        i->second.emplace_back(rule);
+    }
+    // TODO a normalizer shared by several families would need one template per family
+    auto family = [&](Sym norm) -> const AnnexInfo* {
+        for (const auto& [_, annex] : plugin2annexes(plugin))
+            if (annex.sym.plugin == plugin && !annex.subs.empty() && annex.normalizer.sym() == norm) return &annex;
+        return nullptr;
+    };
+    // Bootstrap mode loads no plugin library, so no normalizer touches the rules while they are emitted.
+    for (auto rule : plugin2norms(plugin))
+        if (auto i = files_->find(rule->loc().src); i != files_->end()) i->second->emit(*this);
+    error().ack();
+
+    auto norms_os = std::ostringstream();
+    auto norm_gen = NormGen(*this, targets);
+    for (const auto& [name, rules] : rule_norms)
+        norm_gen.emit(norms_os, name, rules, family(name));
+    auto is_rule_norm = [&](Dbg norm) {
+        return std::ranges::contains(rule_norms, norm.sym(), [](const auto& p) { return p.first; });
+    };
+    error().ack();
+    targets.erase(plugin.str());
+
     auto tab = fe::Tab::spaces();
     std::println(h, "{}#pragma once\n", tab);
     std::println(h, "{}#include <mim/axm.h>", tab);
-    std::println(h, "{}#include <mim/plugin.h>\n", tab);
+    std::println(h, "{}#include <mim/plugin.h>", tab);
+    if (!rule_norms.empty()) std::println(h, "{}#include <mim/world.h>", tab);
+    std::println(h, "");
 
     const auto& foreign = plugin2foreign_aliases(plugin);
-    auto targets        = std::set<std::string>();
     for (const auto& alias : foreign)
         targets.emplace(alias.annex->sym.plugin.str());
     for (const auto& target : targets)
@@ -136,7 +379,7 @@ void AST::bootstrap(Sym plugin, std::ostream& h) {
 
         std::println(outer_namespace.emplace_back(), "template<> constexpr size_t Annex::Num<plug::{}::{}> = {};", plugin, tag, annex.subs.size());
 
-        if (auto norm = annex.normalizer) {
+        if (auto norm = annex.normalizer; norm && !is_rule_norm(norm)) {
             if (auto& subs = annex.subs; !subs.empty()) {
                 std::println(h, "{}template<{}>\nconst Def* {}(const Def*, const Def*, const Def*);\n", tab, tag,
                            norm);
@@ -197,6 +440,13 @@ void AST::bootstrap(Sym plugin, std::ostream& h) {
     }
 
     std::println(h, "{}\n#endif", tab);
+
+    // Only here are all Annex specializations, which the generated normalizers instantiate, complete.
+    if (!rule_norms.empty()) {
+        std::println(h, "\nnamespace mim::plug::{} {{\n", plugin);
+        std::print(h, "{}", norms_os.str());
+        std::println(h, "}} // namespace mim::plug::{}", plugin);
+    }
 }
 
 void AST::bootstrap_py(Sym plugin, std::ostream& h) {

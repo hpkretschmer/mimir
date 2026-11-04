@@ -3,9 +3,11 @@
 #include <set>
 
 #include "mim/check.h"
+#include "mim/nom.h"
 #include "mim/rule.h"
 
 #include "mim/ast/parser.h"
+#include "mim/phase/nom_erasure.h"
 
 using namespace std::literals;
 
@@ -64,6 +66,15 @@ std::string escape(Sym sym, std::span<const std::string_view> keywords) {
 
 std::string_view kind(const AnnexInfo& annex) { return annex.fields ? "field" : "ctor"; }
 
+/// Applies NomErasure to a single Rule.
+/// Its new World has no annexes attached, so each Axm is copied there with its erased type.
+class RuleEraser : public NomErasure {
+public:
+    using NomErasure::NomErasure;
+
+    const Def* lookup(const Def* old_def) final { return Rewriter::lookup(old_def); }
+};
+
 /// Translates the IR of the `norm` rules sharing a name into the C++ normalizer of that name.
 class NormGen {
 public:
@@ -73,19 +84,28 @@ public:
         , plugins_(plugins) {}
 
     /// Each rule becomes its own function, so a failed match can just `return nullptr` and the next rule is tried.
+    /// A rule that mentions a nominal type gets an erased twin, which keeps it firing after NomErasure.
     /// A @p family's normalizer is a template over its sub-tags that only tries the rules headed by that sub-tag.
     void emit(std::ostream& os, Sym name, const std::vector<const RuleDecl*>& rules, const AnnexInfo* family) {
         auto norm  = escape(name, Cpp_Keywords);
         auto heads = std::vector<std::pair<const AnnexInfo*, sub_t>>();
-        for (size_t i = 0, e = rules.size(); i != e; ++i)
-            heads.emplace_back(emit(os, std::format("{}_{}", norm, i), rules[i]));
+        auto fn    = [&]() { return std::format("{}_{}", norm, heads.size()); };
+        for (auto decl : rules) {
+            auto rule = decl->def()->as<Rule>();
+            heads.emplace_back(emit(os, fn(), decl, rule));
+            if (RWPhase::mentions(rule,
+                                  [](const Def* d) { return d->isa<Nom>() || d->isa<Name>() || d->isa<Struc>(); })) {
+                auto eraser = RuleEraser(rule->world(), "nom_erasure");
+                heads.emplace_back(emit(os, fn(), decl, eraser.rewrite(rule)->as<Rule>()));
+            }
+        }
 
         if (family) std::println(os, "template<{} id>", tag_name(*family));
         std::println(os,
                      "inline const Def* {}([[maybe_unused]] const Def* type, [[maybe_unused]] const Def* callee, "
                      "[[maybe_unused]] const Def* arg) {{",
                      norm);
-        for (size_t i = 0, e = rules.size(); i != e; ++i) {
+        for (size_t i = 0, e = heads.size(); i != e; ++i) {
             auto call = std::format("if (auto res = {}_{}(type, callee, arg)) return res;", norm, i);
             if (auto [annex, sub] = heads[i]; family && annex == family)
                 std::println(os, "    if constexpr (id == {})\n        {}", sub_name(*family, sub), call);
@@ -96,18 +116,18 @@ public:
     }
 
 private:
-    /// @returns the annex and sub-tag that head the lhs of @p decl, or `{nullptr, 0}` if no axiom does.
-    std::pair<const AnnexInfo*, sub_t> emit(std::ostream& os, const std::string& fn, const RuleDecl* decl) {
+    /// @returns the annex and sub-tag that head the lhs of @p rule, or `{nullptr, 0}` if no axiom does.
+    std::pair<const AnnexInfo*, sub_t>
+    emit(std::ostream& os, const std::string& fn, const RuleDecl* decl, const Rule* rule) {
         metas_.clear();
         names_.clear();
         bound_.clear();
         body_.str("");
         num_tmps_ = 0;
 
-        auto rule = decl->def()->as<Rule>();
-        var_      = rule->has_var();
-        auto lhs  = rule->lhs()->zonk();
-        auto app  = lhs->isa<App>();
+        var_     = rule->has_var();
+        auto lhs = rule->lhs()->zonk();
+        auto app = lhs->isa<App>();
 
         // TODO a non-App lhs, such as a nullary axiom, has no (callee, arg) to match against
         // TODO an Axm with a custom curry or trip counter normalizes at another spot than after its last argument
@@ -171,6 +191,16 @@ private:
         // An implicit argument that nothing in the lhs determines.
         if (pat->isa<Hole>()) return;
 
+        // A phase that rewrites the type of an Axm rebuilds it under the same flags, so it is no longer World::annex.
+        if (auto axm = pat->isa<Axm>()) {
+            if (auto [annex, sub] = this->annex(axm); annex) {
+                line("if (auto axm = {}->isa<Axm>(); !axm || axm->flags() != {}) return nullptr;", def,
+                     annex->subs.empty() ? std::format("Annex::base<{}>()", tag_name(*annex))
+                                         : std::format("flags_t({})", sub_name(*annex, sub)));
+                return;
+            }
+        }
+
         // TODO match up to normalization: e.g. a literal arg may stem from a folded application in the pattern
         if (!var_ || !pat->has_free_var(var_)) {
             line("if ({} != {}) return nullptr;", def, build(pat));
@@ -185,8 +215,9 @@ private:
 
         auto tmp = std::format("d{}", num_tmps_++);
         line("auto {} = {};", tmp, def);
-        line("if ({}->node() != Node::{} || {}->num_ops() != {}) return nullptr;", tmp, pat->node_name(), tmp,
-             pat->num_ops());
+        // Some nodes keep part of their identity in their flags, e.g. the constructor index of an Inj.
+        line("if ({}->node() != Node::{} || {}->flags() != 0x{:x}_u64 || {}->num_ops() != {}) return nullptr;", tmp,
+             pat->node_name(), tmp, pat->flags(), tmp, pat->num_ops());
         for (size_t i = 0, e = pat->num_ops(); i != e; ++i)
             match(pat->op(i), std::format("{}->op({})", tmp, i));
     }
